@@ -9,10 +9,12 @@ import {
   IconMinus,
   IconOpen,
   IconPlus,
+  IconRedo,
   IconSave,
   IconSaveAs,
   IconSearch,
   IconSplit,
+  IconUndo,
 } from './icons';
 
 const ZOOM_PRESETS = [50, 75, 100, 125, 150, 200, 300, 400];
@@ -63,6 +65,29 @@ export function Toolbar({ onSplit }: { onSplit: () => void }) {
         >
           <IconSaveAs />
           <span>Save as</span>
+        </button>
+      </div>
+
+      <div className="toolbar-divider" />
+
+      <div className="toolbar-group">
+        <button
+          type="button"
+          className="btn icon-only"
+          disabled={!state.canUndo}
+          onClick={() => void store.undo()}
+          title="Undo (Ctrl+Z)"
+        >
+          <IconUndo />
+        </button>
+        <button
+          type="button"
+          className="btn icon-only"
+          disabled={!state.canRedo}
+          onClick={() => void store.redo()}
+          title="Redo (Ctrl+Shift+Z or Ctrl+Y)"
+        >
+          <IconRedo />
         </button>
       </div>
 

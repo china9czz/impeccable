@@ -67,6 +67,14 @@ export default function App() {
       } else if (mod && e.key === '-') {
         e.preventDefault();
         store.zoomOut();
+      } else if (mod && e.key.toLowerCase() === 'z' && !typing) {
+        // While a textarea is focused the browser's own text undo wins.
+        e.preventDefault();
+        if (e.shiftKey) void store.redo();
+        else void store.undo();
+      } else if (mod && e.key.toLowerCase() === 'y' && !typing) {
+        e.preventDefault();
+        void store.redo();
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && !typing) {
         store.deleteSelectedAnnotation();
       } else if (e.key === 'Escape' && !typing) {

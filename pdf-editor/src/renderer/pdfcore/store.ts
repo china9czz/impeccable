@@ -41,6 +41,8 @@ export interface EditorState {
   errorMessage: string | null;
   /** Bundled CJK font fetch state; null until the background load settles. */
   cjkFontStatus: CjkFontStatus | null;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 const initialState: EditorState = {
@@ -66,7 +68,36 @@ const initialState: EditorState = {
   statusMessage: 'Open a PDF to begin',
   errorMessage: null,
   cjkFontStatus: 'loading',
+  canUndo: false,
+  canRedo: false,
 };
+
+/** One reversible mutation. Stack discipline keeps page references valid:
+ * an entry is only ever undone after every later entry has been undone. */
+type HistoryEntry = {
+  label: string;
+  time: number;
+  coalesceKey?: string;
+} & (
+  | { kind: 'ann-add'; ann: Annotation }
+  | { kind: 'ann-remove'; pageId: string; ann: Annotation; index: number }
+  | { kind: 'ann-update'; pageId: string; id: string; before: Annotation; after: Annotation }
+  | { kind: 'rotate'; pageId: string; delta: number }
+  | {
+      kind: 'delete-page';
+      pageIndex: number;
+      pageId: string;
+      pageBytes: Uint8Array;
+      anns: Annotation[];
+    }
+  | { kind: 'insert-blank'; pageIndex: number; pageId: string; width: number; height: number }
+  | { kind: 'move-page'; from: number; to: number }
+  | { kind: 'merge'; pageIds: string[]; sourceBytes: Uint8Array; sourceName: string }
+);
+
+const HISTORY_LIMIT = 100;
+/** Rapid-fire updates with the same key (drags, slider/color changes) merge. */
+const COALESCE_WINDOW_MS = 1200;
 
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 5;
@@ -96,6 +127,17 @@ export class EditorStore {
   private lastSearchQuery = '';
   private notifiedFirstRender = false;
   private statusTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly undoStack: HistoryEntry[] = [];
+  private readonly redoStack: HistoryEntry[] = [];
+  /**
+   * dirty = (revision !== savedRevision). Every mutation moves the revision
+   * one step, undo/redo walk it back and forth, and saving pins the saved
+   * revision — so undoing back to the saved state correctly shows "clean".
+   */
+  private revision = 0;
+  private savedRevision = 0;
+  /** Serializes structural (async) ops so history stays a consistent chain. */
+  private opQueue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly platform: PdfEditorApi) {
     // Start the CJK font fetch immediately but never await it here: app
@@ -126,6 +168,43 @@ export class EditorStore {
     }, 6000);
   }
 
+  // --------------------------------------------------------------- history
+
+  private derive(): Pick<EditorState, 'dirty' | 'canUndo' | 'canRedo'> {
+    return {
+      dirty: this.revision !== this.savedRevision,
+      canUndo: this.undoStack.length > 0,
+      canRedo: this.redoStack.length > 0,
+    };
+  }
+
+  private pushHistory(entry: HistoryEntry): void {
+    this.undoStack.push(entry);
+    if (this.undoStack.length > HISTORY_LIMIT) this.undoStack.shift();
+  }
+
+  /** A fresh user mutation: revision advances and the redo branch dies. */
+  private mutated(): void {
+    this.revision += 1;
+    this.redoStack.length = 0;
+  }
+
+  private enqueue<T>(op: () => Promise<T>): Promise<T> {
+    const next = this.opQueue.then(op, op);
+    this.opQueue = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  private clearHistory(): void {
+    this.undoStack.length = 0;
+    this.redoStack.length = 0;
+    this.revision = 0;
+    this.savedRevision = 0;
+  }
+
   // ---------------------------------------------------------------- opening
 
   async openFile(file: OpenedFile): Promise<void> {
@@ -146,12 +225,13 @@ export class EditorStore {
       this.pageProxyCache.clear();
       this.notifiedFirstRender = false;
       this.lastSearchQuery = '';
+      this.clearHistory();
       await this.reloadPageInfos();
 
       this.set({
         phase: 'ready',
         fileName: file.name,
-        dirty: false,
+        ...this.derive(),
         pageCount: pdfDoc.numPages,
         currentPage: 0,
         docVersion: this.state.docVersion + 1,
@@ -331,21 +411,23 @@ export class EditorStore {
   setColor(color: string): void {
     this.set({ color });
     const selected = this.getSelectedAnnotation();
-    if (selected) this.updateAnnotation(selected.id, { color });
+    if (selected) this.updateAnnotation(selected.id, { color }, { coalesceKey: `color:${selected.id}` });
   }
 
   setStrokeWidth(strokeWidth: number): void {
     this.set({ strokeWidth });
     const selected = this.getSelectedAnnotation();
     if (selected && (selected.kind === 'pen' || selected.kind === 'rect')) {
-      this.updateAnnotation(selected.id, { strokeWidth });
+      this.updateAnnotation(selected.id, { strokeWidth }, { coalesceKey: `stroke:${selected.id}` });
     }
   }
 
   setFontSize(fontSize: number): void {
     this.set({ fontSize });
     const selected = this.getSelectedAnnotation();
-    if (selected && selected.kind === 'text') this.updateAnnotation(selected.id, { fontSize });
+    if (selected && selected.kind === 'text') {
+      this.updateAnnotation(selected.id, { fontSize }, { coalesceKey: `font:${selected.id}` });
+    }
   }
 
   // ------------------------------------------------------------- annotations
@@ -378,20 +460,55 @@ export class EditorStore {
     const list = this.annotations.get(ann.pageId) ?? [];
     list.push(ann);
     this.annotations.set(ann.pageId, list);
+    this.pushHistory({
+      kind: 'ann-add',
+      label: `${ann.kind} annotation`,
+      time: Date.now(),
+      ann: structuredClone(ann),
+    });
+    this.mutated();
     this.set({
       annotationsVersion: this.state.annotationsVersion + 1,
-      dirty: true,
+      ...this.derive(),
     });
   }
 
-  updateAnnotation(id: string, patch: AnnotationPatch): void {
-    for (const list of this.annotations.values()) {
+  updateAnnotation(id: string, patch: AnnotationPatch, opts?: { coalesceKey?: string }): void {
+    for (const [pageId, list] of this.annotations) {
       const index = list.findIndex((a) => a.id === id);
       if (index === -1) continue;
-      list[index] = { ...list[index]!, ...patch } as Annotation;
+      const before = list[index]!;
+      const after = { ...before, ...patch } as Annotation;
+      list[index] = after;
+      const now = Date.now();
+      const top = this.undoStack[this.undoStack.length - 1];
+      if (
+        opts?.coalesceKey &&
+        top?.kind === 'ann-update' &&
+        top.id === id &&
+        top.coalesceKey === opts.coalesceKey &&
+        now - top.time < COALESCE_WINDOW_MS
+      ) {
+        // Same gesture (drag / slider): extend the existing entry instead of
+        // flooding the stack with one entry per pointer move.
+        top.after = structuredClone(after);
+        top.time = now;
+      } else {
+        this.pushHistory({
+          kind: 'ann-update',
+          label: 'edit annotation',
+          time: now,
+          coalesceKey: opts?.coalesceKey,
+          pageId,
+          id,
+          before: structuredClone(before),
+          after: structuredClone(after),
+        });
+      }
+      this.mutated();
       this.set({
         annotationsVersion: this.state.annotationsVersion + 1,
-        dirty: true,
+        ...this.derive(),
       });
       return;
     }
@@ -401,12 +518,23 @@ export class EditorStore {
     for (const [pageId, list] of this.annotations) {
       const index = list.findIndex((a) => a.id === id);
       if (index === -1) continue;
-      list.splice(index, 1);
+      const [removed] = list.splice(index, 1);
       if (list.length === 0) this.annotations.delete(pageId);
+      if (removed) {
+        this.pushHistory({
+          kind: 'ann-remove',
+          label: `delete ${removed.kind} annotation`,
+          time: Date.now(),
+          pageId,
+          ann: structuredClone(removed),
+          index,
+        });
+        this.mutated();
+      }
       this.set({
         annotationsVersion: this.state.annotationsVersion + 1,
         selectedAnnotationId: null,
-        dirty: true,
+        ...this.derive(),
       });
       this.status('Annotation deleted');
       return;
@@ -415,6 +543,133 @@ export class EditorStore {
 
   deleteSelectedAnnotation(): void {
     if (this.state.selectedAnnotationId) this.deleteAnnotation(this.state.selectedAnnotationId);
+  }
+
+  // ------------------------------------------------------------ undo/redo
+
+  async undo(): Promise<void> {
+    return this.undoRedo('undo');
+  }
+
+  async redo(): Promise<void> {
+    return this.undoRedo('redo');
+  }
+
+  private async undoRedo(direction: 'undo' | 'redo'): Promise<void> {
+    return this.enqueue(async () => {
+      const entry = direction === 'undo' ? this.undoStack.pop() : this.redoStack.pop();
+      if (!entry) return;
+      await this.applyHistory(entry, direction === 'redo');
+      if (direction === 'undo') this.redoStack.push(entry);
+      else this.undoStack.push(entry);
+      this.revision += direction === 'undo' ? -1 : 1;
+      this.set({
+        annotationsVersion: this.state.annotationsVersion + 1,
+        selectedAnnotationId: null,
+        ...this.derive(),
+      });
+      this.status(`${direction === 'undo' ? 'Undid' : 'Redid'}: ${entry.label}`);
+    });
+  }
+
+  /** Replay (forward) or reverse one history entry without recording it. */
+  private async applyHistory(entry: HistoryEntry, forward: boolean): Promise<void> {
+    switch (entry.kind) {
+      case 'ann-add':
+        if (forward) this.reinsertAnnotation(entry.ann);
+        else this.removeAnnotationById(entry.ann.id);
+        break;
+      case 'ann-remove':
+        if (forward) this.removeAnnotationById(entry.ann.id);
+        else this.reinsertAnnotation(entry.ann, entry.pageId, entry.index);
+        break;
+      case 'ann-update':
+        this.replaceAnnotation(entry.id, forward ? entry.after : entry.before);
+        break;
+      case 'rotate':
+        await this.rotatePageId(entry.pageId, forward ? entry.delta : -entry.delta);
+        break;
+      case 'delete-page':
+        if (forward) await this.deletePageId(entry.pageId);
+        else await this.reinsertDeletedPage(entry);
+        break;
+      case 'insert-blank':
+        if (forward) await this.insertBlankPage(entry.pageIndex, entry.pageId, entry.width, entry.height);
+        else await this.deletePageId(entry.pageId);
+        break;
+      case 'move-page':
+        await this.movePageRaw(forward ? entry.from : entry.to, forward ? entry.to : entry.from);
+        break;
+      case 'merge':
+        if (forward) await this.reMerge(entry);
+        else await this.unmerge(entry);
+        break;
+    }
+  }
+
+  private reinsertAnnotation(ann: Annotation, pageId?: string, index?: number): void {
+    const targetPage = pageId ?? ann.pageId;
+    const list = this.annotations.get(targetPage) ?? [];
+    const copy = structuredClone(ann);
+    if (index !== undefined && index <= list.length) list.splice(index, 0, copy);
+    else list.push(copy);
+    this.annotations.set(targetPage, list);
+  }
+
+  private removeAnnotationById(id: string): void {
+    for (const [pageId, list] of this.annotations) {
+      const index = list.findIndex((a) => a.id === id);
+      if (index === -1) continue;
+      list.splice(index, 1);
+      if (list.length === 0) this.annotations.delete(pageId);
+      return;
+    }
+  }
+
+  private replaceAnnotation(id: string, ann: Annotation): void {
+    for (const list of this.annotations.values()) {
+      const index = list.findIndex((a) => a.id === id);
+      if (index === -1) continue;
+      list[index] = structuredClone(ann);
+      return;
+    }
+  }
+
+  private async reinsertDeletedPage(entry: Extract<HistoryEntry, { kind: 'delete-page' }>): Promise<void> {
+    if (!this.libDoc) return;
+    const source = await PDFDocument.load(entry.pageBytes);
+    const [page] = await this.libDoc.copyPages(source, [0]);
+    const index = Math.min(entry.pageIndex, this.pageIds.length);
+    this.libDoc.insertPage(index, page);
+    this.pageIds.splice(index, 0, entry.pageId);
+    if (entry.anns.length > 0) {
+      this.annotations.set(entry.pageId, entry.anns.map((a) => structuredClone(a)));
+    }
+    await this.resync(`Restored page ${index + 1}`);
+  }
+
+  private async unmerge(entry: Extract<HistoryEntry, { kind: 'merge' }>): Promise<void> {
+    if (!this.libDoc) return;
+    for (const pageId of entry.pageIds) {
+      const index = this.pageIds.indexOf(pageId);
+      if (index === -1) continue;
+      this.pageIds.splice(index, 1);
+      this.annotations.delete(pageId);
+      this.libDoc.removePage(index);
+    }
+    await this.resync(`Removed ${entry.pageIds.length} merged pages`);
+  }
+
+  private async reMerge(entry: Extract<HistoryEntry, { kind: 'merge' }>): Promise<void> {
+    if (!this.libDoc) return;
+    const source = await PDFDocument.load(entry.sourceBytes, { ignoreEncryption: true });
+    const copied = await this.libDoc.copyPages(source, source.getPageIndices());
+    copied.forEach((page, i) => {
+      this.libDoc!.addPage(page);
+      // Reuse the original ids so later history entries keep their targets.
+      this.pageIds.push(entry.pageIds[i] ?? uid());
+    });
+    await this.resync(`Re-merged ${copied.length} pages from ${entry.sourceName}`);
   }
 
   // ------------------------------------------------------------------ search
@@ -532,7 +787,7 @@ export class EditorStore {
       docVersion: this.state.docVersion + 1,
       pageCount: this.pageIds.length,
       currentPage,
-      dirty: true,
+      ...this.derive(),
     });
     // Rotations change page dimensions; re-fit when a fit mode is active.
     this.applyFitScale();
@@ -540,31 +795,96 @@ export class EditorStore {
   }
 
   async rotateCurrentPage(deltaDegrees: number): Promise<void> {
-    if (!this.libDoc || this.state.phase !== 'ready') return;
-    const page = this.libDoc.getPage(this.state.currentPage);
+    return this.enqueue(async () => {
+      const pageId = this.pageIds[this.state.currentPage];
+      if (!pageId || !(await this.rotatePageId(pageId, deltaDegrees))) return;
+      this.pushHistory({
+        kind: 'rotate',
+        label: `rotate page ${this.state.currentPage + 1}`,
+        time: Date.now(),
+        pageId,
+        delta: deltaDegrees,
+      });
+      this.mutated();
+      this.set(this.derive());
+    });
+  }
+
+  /** Rotate the page identified by pageId. Returns false when not possible. */
+  private async rotatePageId(pageId: string, deltaDegrees: number): Promise<boolean> {
+    if (!this.libDoc || this.state.phase !== 'ready') return false;
+    const index = this.pageIds.indexOf(pageId);
+    if (index === -1) return false;
+    const page = this.libDoc.getPage(index);
     const next = (((page.getRotation().angle + deltaDegrees) % 360) + 360) % 360;
     page.setRotation(degrees(next));
-    await this.resync(`Rotated page ${this.state.currentPage + 1} to ${next} deg`);
+    await this.resync(`Rotated page ${index + 1} to ${next} deg`);
+    return true;
   }
 
   async deleteCurrentPage(): Promise<void> {
-    if (!this.libDoc || this.state.phase !== 'ready') return;
-    if (this.state.pageCount <= 1) {
-      this.status('Cannot delete the last page');
-      return;
-    }
-    const index = this.state.currentPage;
-    const [removedId] = this.pageIds.splice(index, 1);
-    if (removedId) this.annotations.delete(removedId);
+    return this.enqueue(async () => {
+      if (!this.libDoc || this.state.phase !== 'ready') return;
+      if (this.state.pageCount <= 1) {
+        this.status('Cannot delete the last page');
+        return;
+      }
+      const index = this.state.currentPage;
+      const pageId = this.pageIds[index];
+      if (!pageId) return;
+      // Export the page alone so undo can reinsert it byte-identical.
+      const single = await PDFDocument.create();
+      const [copy] = await single.copyPages(this.libDoc, [index]);
+      single.addPage(copy);
+      const pageBytes = await single.save();
+      const anns = this.getAnnotations(pageId).map((a) => structuredClone(a));
+
+      await this.deletePageId(pageId);
+      this.pushHistory({
+        kind: 'delete-page',
+        label: `delete page ${index + 1}`,
+        time: Date.now(),
+        pageIndex: index,
+        pageId,
+        pageBytes,
+        anns,
+      });
+      this.mutated();
+      this.set(this.derive());
+    });
+  }
+
+  /** Remove a page (by stable id) plus its annotations; re-sync everything. */
+  private async deletePageId(pageId: string): Promise<void> {
+    if (!this.libDoc) return;
+    const index = this.pageIds.indexOf(pageId);
+    if (index === -1) return;
+    this.pageIds.splice(index, 1);
+    this.annotations.delete(pageId);
     this.libDoc.removePage(index);
     await this.resync(`Deleted page ${index + 1}`);
   }
 
   async movePage(fromIndex: number, toIndex: number): Promise<void> {
-    if (!this.libDoc || this.state.phase !== 'ready') return;
+    return this.enqueue(async () => {
+      if (!(await this.movePageRaw(fromIndex, toIndex))) return;
+      this.pushHistory({
+        kind: 'move-page',
+        label: `move page ${fromIndex + 1} to ${toIndex + 1}`,
+        time: Date.now(),
+        from: fromIndex,
+        to: toIndex,
+      });
+      this.mutated();
+      this.set(this.derive());
+    });
+  }
+
+  private async movePageRaw(fromIndex: number, toIndex: number): Promise<boolean> {
+    if (!this.libDoc || this.state.phase !== 'ready') return false;
     const count = this.pageIds.length;
     if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= count || toIndex >= count) {
-      return;
+      return false;
     }
     // Rebuild via copyPages: remove+reinsert of the same page object is not
     // reliably supported by pdf-lib, copying into a fresh document is.
@@ -579,33 +899,69 @@ export class EditorStore {
     for (const page of copied) fresh.addPage(page);
     this.libDoc = fresh;
     await this.resync(`Moved page ${fromIndex + 1} to position ${toIndex + 1}`);
+    return true;
   }
 
   async insertBlankPageAfterCurrent(): Promise<void> {
-    if (!this.libDoc || this.state.phase !== 'ready') return;
-    const index = this.state.currentPage;
-    const source = this.libDoc.getPage(index);
-    const { width, height } = source.getSize();
-    this.libDoc.insertPage(index + 1, [width, height]);
-    this.pageIds.splice(index + 1, 0, uid());
-    await this.resync(`Inserted a blank page after page ${index + 1}`);
-    this.goToPage(index + 1);
+    return this.enqueue(async () => {
+      if (!this.libDoc || this.state.phase !== 'ready') return;
+      const index = this.state.currentPage;
+      const source = this.libDoc.getPage(index);
+      const { width, height } = source.getSize();
+      const pageId = uid();
+      await this.insertBlankPage(index + 1, pageId, width, height);
+      this.pushHistory({
+        kind: 'insert-blank',
+        label: `insert blank page at ${index + 2}`,
+        time: Date.now(),
+        pageIndex: index + 1,
+        pageId,
+        width,
+        height,
+      });
+      this.mutated();
+      this.set(this.derive());
+      this.goToPage(index + 1);
+    });
+  }
+
+  private async insertBlankPage(pageIndex: number, pageId: string, width: number, height: number): Promise<void> {
+    if (!this.libDoc) return;
+    this.libDoc.insertPage(pageIndex, [width, height]);
+    this.pageIds.splice(pageIndex, 0, pageId);
+    await this.resync(`Inserted a blank page at position ${pageIndex + 1}`);
   }
 
   async mergePdf(file: OpenedFile): Promise<void> {
-    if (!this.libDoc || this.state.phase !== 'ready') return;
-    try {
-      const source = await PDFDocument.load(file.data, { ignoreEncryption: true });
-      const indices = source.getPageIndices();
-      const copied = await this.libDoc.copyPages(source, indices);
-      for (const page of copied) {
-        this.libDoc.addPage(page);
-        this.pageIds.push(uid());
+    return this.enqueue(async () => {
+      if (!this.libDoc || this.state.phase !== 'ready') return;
+      try {
+        const sourceBytes = file.data instanceof Uint8Array ? file.data : new Uint8Array(file.data);
+        const source = await PDFDocument.load(sourceBytes, { ignoreEncryption: true });
+        const indices = source.getPageIndices();
+        const copied = await this.libDoc.copyPages(source, indices);
+        const newIds: string[] = [];
+        for (const page of copied) {
+          this.libDoc.addPage(page);
+          const id = uid();
+          this.pageIds.push(id);
+          newIds.push(id);
+        }
+        await this.resync(`Merged ${indices.length} page${indices.length === 1 ? '' : 's'} from ${file.name}`);
+        this.pushHistory({
+          kind: 'merge',
+          label: `merge ${indices.length} pages from ${file.name}`,
+          time: Date.now(),
+          pageIds: newIds,
+          sourceBytes,
+          sourceName: file.name,
+        });
+        this.mutated();
+        this.set(this.derive());
+      } catch (error) {
+        this.status(`Merge failed: ${error instanceof Error ? error.message : String(error)}`);
       }
-      await this.resync(`Merged ${indices.length} page${indices.length === 1 ? '' : 's'} from ${file.name}`);
-    } catch (error) {
-      this.status(`Merge failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    });
   }
 
   /** Split: export 0-based page indices as a new PDF file. */
@@ -657,6 +1013,12 @@ export class EditorStore {
     return typeof window !== 'undefined' && 'pdfEditor' in window;
   }
 
+  /** Pin the current revision as the saved baseline (dirty becomes false). */
+  private markSaved(): void {
+    this.savedRevision = this.revision;
+    this.set(this.derive());
+  }
+
   async save(saveAs = false): Promise<void> {
     if (this.state.phase !== 'ready') return;
     try {
@@ -668,7 +1030,7 @@ export class EditorStore {
         : '';
       if (!saveAs && this.filePath) {
         await this.platform.writeFile(this.filePath, bytes);
-        this.set({ dirty: false });
+        this.markSaved();
         this.status(`Saved ${this.state.fileName ?? ''} (annotations flattened)${cjkNote}`);
         return;
       }
@@ -678,14 +1040,12 @@ export class EditorStore {
       if (chosen) {
         await this.platform.writeFile(chosen, bytes);
         this.filePath = chosen;
-        this.set({
-          dirty: false,
-          fileName: chosen.split(/[\\/]/).pop() ?? chosen,
-        });
+        this.markSaved();
+        this.set({ fileName: chosen.split(/[\\/]/).pop() ?? chosen });
         this.status(`Saved ${chosen}${cjkNote}`);
       } else if (!this.isElectron) {
         await this.platform.writeFile(suggested, bytes);
-        this.set({ dirty: false });
+        this.markSaved();
         this.status(`Downloaded ${suggested}${cjkNote}`);
       } else {
         this.status('Save cancelled');

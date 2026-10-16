@@ -300,6 +300,153 @@ try {
   check((await page.locator('.search-hit').count()) > 0, 'CJK search hit highlighted after reopen');
   await page.evaluate(() => window.__vellumStore.clearSearch());
 
+  // ------------------------------------------- 7c. undo/redo: annotations
+  console.log('undo/redo: annotations');
+  const undoBtn = 'button[title="Undo (Ctrl+Z)"]';
+  const redoBtn = 'button[title="Redo (Ctrl+Shift+Z or Ctrl+Y)"]';
+  check(!(await page.locator(undoBtn).isEnabled()), 'undo disabled on a freshly opened document');
+  // The CJK search above scrolled to the match page; jump back to page 1 so
+  // the coordinates below land inside the browser viewport.
+  await page.evaluate(() => window.__vellumStore.goToPage(0));
+  await page.evaluate(() => window.__vellumStore.setFitMode('page'));
+  await page.waitForTimeout(400);
+  const wrap2 = await page.locator('.page-wrap').first().boundingBox();
+  if (!wrap2) throw new Error('no .page-wrap visible after reopen');
+  const px2 = (fx, fy) => [wrap2.x + wrap2.width * fx, wrap2.y + wrap2.height * fy];
+  const addText = async (fx, fy, text) => {
+    await tool('Text');
+    await page.mouse.click(...px2(fx, fy));
+    await page.waitForSelector('.inline-editor textarea', { timeout: 5000 });
+    await page.fill('.inline-editor textarea', text);
+    await page.click('.mini-btn.primary');
+  };
+  await addText(0.2, 0.45, 'Undo chain A');
+  await addText(0.2, 0.55, 'Undo chain B');
+  await page.waitForFunction(() => window.__vellumStore.annotationCount() === 2, null, { timeout: 5000 });
+  check(await page.locator(undoBtn).isEnabled(), 'undo enabled after edits');
+
+  await page.keyboard.press('Control+z');
+  await page.waitForFunction(() => window.__vellumStore.annotationCount() === 1, null, { timeout: 5000 });
+  check(true, 'Ctrl+Z undoes the last text box');
+  await page.keyboard.press('Control+Shift+z');
+  await page.waitForFunction(() => window.__vellumStore.annotationCount() === 2, null, { timeout: 5000 });
+  check(true, 'Ctrl+Shift+Z redoes it');
+
+  await page.evaluate(() => {
+    const store = window.__vellumStore;
+    const info = store.getPageInfo(0);
+    const anns = info ? store.getAnnotations(info.id) : [];
+    if (anns[0]) store.selectAnnotation(anns[0].id);
+  });
+  await page.keyboard.press('Delete');
+  await page.waitForFunction(() => window.__vellumStore.annotationCount() === 1, null, { timeout: 5000 });
+  check(true, 'Delete removes the selected annotation');
+  await page.keyboard.press('Control+z');
+  await page.waitForFunction(() => window.__vellumStore.annotationCount() === 2, null, { timeout: 5000 });
+  check(true, 'undo restores the deleted annotation');
+
+  await page.click(undoBtn);
+  await page.click(undoBtn);
+  await page.waitForFunction(() => window.__vellumStore.annotationCount() === 0, null, { timeout: 5000 });
+  check(true, 'toolbar undo steps back to zero annotations');
+  check(!(await page.locator(undoBtn).isEnabled()), 'undo disabled at the bottom of the stack');
+  check(await page.locator(redoBtn).isEnabled(), 'redo enabled after undos');
+  await page.click(redoBtn);
+  await page.click(redoBtn);
+  await page.waitForFunction(() => window.__vellumStore.annotationCount() === 2, null, { timeout: 5000 });
+  check(true, 'redo replays both text boxes');
+
+  // ------------------------------------- 7d. undo/redo around a save point
+  console.log('undo/redo: save point');
+  const [saveDownload2] = await Promise.all([
+    page.waitForEvent('download', { timeout: 20_000 }),
+    page.keyboard.press('Control+s'),
+  ]);
+  await downloadToBuffer(saveDownload2);
+  s = await state(page);
+  check(!s.dirty, 'save pins the clean revision');
+  await page.click(undoBtn);
+  await page.waitForFunction(() => window.__vellumStore.getState().dirty, null, { timeout: 5000 });
+  check(true, 'undo after save marks the document dirty again');
+  await page.click(redoBtn);
+  await page.waitForFunction(() => !window.__vellumStore.getState().dirty, null, { timeout: 5000 });
+  s = await state(page);
+  check(!s.dirty && s.annotations === 2, 'redo returns exactly to the saved revision');
+
+  // ---------------------------------------- 7e. undo/redo: page operations
+  console.log('undo/redo: page operations');
+  const ratio0 = await ratioOf();
+  prev = (await state(page)).docVersion;
+  await page.click('button[title="Rotate page right"]');
+  await waitDocVersion(page, prev);
+  const ratio1 = await ratioOf();
+  prev = (await state(page)).docVersion;
+  await page.click(undoBtn);
+  await waitDocVersion(page, prev);
+  const ratio2 = await ratioOf();
+  check(
+    ratio0 < 0.9 && ratio1 > 1.1 && ratio2 < 0.9,
+    `undo reverts rotation (${ratio0.toFixed(2)} -> ${ratio1.toFixed(2)} -> ${ratio2.toFixed(2)})`,
+  );
+  prev = (await state(page)).docVersion;
+  await page.click(redoBtn);
+  await waitDocVersion(page, prev);
+  check((await ratioOf()) > 1.1, 'redo re-applies rotation');
+  prev = (await state(page)).docVersion;
+  await page.click(undoBtn);
+  await waitDocVersion(page, prev);
+
+  prev = (await state(page)).docVersion;
+  await page.click('button[title="Insert blank page after current"]');
+  await waitDocVersion(page, prev);
+  s = await state(page);
+  check(s.pageCount === 7, `blank page inserted again (pages=${s.pageCount})`);
+  prev = (await state(page)).docVersion;
+  await page.click(undoBtn);
+  await waitDocVersion(page, prev);
+  s = await state(page);
+  check(s.pageCount === 6, 'undo removes the inserted blank page');
+
+  prev = (await state(page)).docVersion;
+  await page.click('button[title="Delete current page"]');
+  await waitDocVersion(page, prev);
+  s = await state(page);
+  check(s.pageCount === 5, `page deleted for undo test (pages=${s.pageCount})`);
+  prev = (await state(page)).docVersion;
+  await page.click(undoBtn);
+  await waitDocVersion(page, prev);
+  s = await state(page);
+  check(s.pageCount === 6, 'undo restores the deleted page byte-identical');
+
+  const orderBefore = await page.evaluate(() => {
+    const store = window.__vellumStore;
+    return Array.from({ length: store.getState().pageCount }, (_, i) => store.getPageInfo(i)?.id ?? '?');
+  });
+  prev = (await state(page)).docVersion;
+  await page.evaluate(() => {
+    const dt = new DataTransfer();
+    const thumbs = [...document.querySelectorAll('.thumb')];
+    const src = thumbs[0];
+    const dst = thumbs[1];
+    const rect = dst.getBoundingClientRect();
+    src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+    dst.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: dt, clientY: rect.bottom - 2, cancelable: true }));
+    dst.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: dt, clientY: rect.bottom - 2 }));
+    src.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+  });
+  await waitDocVersion(page, prev);
+  prev = (await state(page)).docVersion;
+  await page.click(undoBtn);
+  await waitDocVersion(page, prev);
+  const orderRestored = await page.evaluate(() => {
+    const store = window.__vellumStore;
+    return Array.from({ length: store.getState().pageCount }, (_, i) => store.getPageInfo(i)?.id ?? '?');
+  });
+  check(
+    orderRestored.every((id, i) => id === orderBefore[i]),
+    'undo restores the pre-drag page order',
+  );
+
   // --------------------------------------------------------------- 8. merge
   console.log('merge');
   const [chooser] = await Promise.all([
@@ -312,6 +459,18 @@ try {
   s = await state(page);
   check(s.pageCount === 12, `merge appends 6 pages (pages=${s.pageCount})`);
   check((await page.locator('.thumb').count()) === 12, 'sidebar reflects merged page count');
+
+  prev = (await state(page)).docVersion;
+  await page.click(undoBtn);
+  await waitDocVersion(page, prev);
+  s = await state(page);
+  check(s.pageCount === 6, `undo un-merges (pages=${s.pageCount})`);
+  check((await page.locator('.thumb').count()) === 6, 'sidebar shrinks back after un-merge');
+  prev = (await state(page)).docVersion;
+  await page.click(redoBtn);
+  await waitDocVersion(page, prev);
+  s = await state(page);
+  check(s.pageCount === 12, `redo re-merges (pages=${s.pageCount})`);
 
   // --------------------------------------------------------------- 9. split
   console.log('split');

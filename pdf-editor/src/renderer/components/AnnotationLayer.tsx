@@ -151,10 +151,14 @@ export function AnnotationLayer({ pageId, viewport, scale }: LayerProps) {
       const drag = dragRef.current;
       if (!drag || drag.id !== ann.id) return;
       const [x, y] = toPdf(e.clientX, e.clientY);
-      store.updateAnnotation(ann.id, {
-        x: drag.origX + (x - drag.startX),
-        y: drag.origY + (y - drag.startY),
-      });
+      store.updateAnnotation(
+        ann.id,
+        {
+          x: drag.origX + (x - drag.startX),
+          y: drag.origY + (y - drag.startY),
+        },
+        { coalesceKey: `move:${ann.id}` },
+      );
     },
     onPointerUp: () => {
       dragRef.current = null;

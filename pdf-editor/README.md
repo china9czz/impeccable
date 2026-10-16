@@ -26,6 +26,9 @@ document manipulation by `pdf-lib`. The UI is hand-written CSS, no framework.
 - **Add and edit text.** Click anywhere to place a text box with font-size and
   color options, including CJK text (bundled Noto Sans SC). Existing text boxes
   can be moved, edited and restyled; they are flattened into the PDF on save.
+- **Undo/redo.** Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (or Ctrl+Y) cover every edit:
+  annotation create/edit/move/delete, rotate, delete, insert, reorder, merge.
+  Toolbar buttons show the same state. See "Undo model" below for the rules.
 - **Keyboard.** Ctrl/Cmd+O open, Ctrl/Cmd+S save, Ctrl/Cmd+Shift+S save as,
   Ctrl/Cmd+F search, Ctrl/Cmd +/- zoom, Delete removes the selected annotation.
 
@@ -156,12 +159,32 @@ punctuation, fullwidth forms, and the complete U+4E00-9FFF ideograph block.
   (requires `pip install fonttools`; downloads Noto Sans SC and subsets it
   with `--desubroutinize`, which avoids a pdf.js subrIndex rendering warning).
 
+## Undo model
+
+Every reversible mutation (annotation add/edit/delete/move, rotate, delete,
+insert blank, reorder, merge) is one history entry; Ctrl/Cmd+Z walks back and
+Ctrl/Cmd+Shift+Z / Ctrl+Y replays. The rules:
+
+- **Saving does not clear history.** The dirty flag is revision-based: it is
+  set whenever the working state differs from the last saved state, so undoing
+  all the way back to the save point correctly shows a clean document.
+- **Rapid gestures coalesce.** Dragging a text box, dragging a color picker or
+  nudging font size records a single entry per gesture (1.2 s window), not one
+  per pointer event.
+- Deleted pages are stored as single-page PDF bytes in the entry, so undo
+  restores them byte-identical with their annotations. Merge entries keep the
+  source file's bytes for redo — merging a very large file and keeping it in
+  history costs that much memory until the 100-entry limit pushes it out.
+- History is capped at 100 entries and resets when a document is opened.
+- Split (export a range) does not modify the open document and is not an undo
+  entry; it produces a separate file.
+
 ## Known limitations vs a full Acrobat-class editor
 
 - One CJK font weight (Regular) is bundled; bold/italic text flattens in
   Regular. Rare extension-B+ ideographs outside U+4E00-9FFF/F900-FAFF are not
   covered.
-- No undo/redo yet, and no multi-page selection for bulk rotate/delete.
+- No multi-page selection for bulk rotate/delete.
 - Rectangle, pen and highlight annotations can be deleted and recolored but not
   moved or resized; notes and text boxes are movable.
 - Sticky notes flatten as visible marker + text (real popup annotation objects

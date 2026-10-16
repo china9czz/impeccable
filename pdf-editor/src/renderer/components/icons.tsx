@@ -138,6 +138,20 @@ export const IconRotateCcw = icon(
   </>,
 );
 
+export const IconUndo = icon(
+  <>
+    <path d="M6.5 3.5 3 7l3.5 3.5" />
+    <path d="M3 7h6.5a3.5 3.5 0 0 1 0 7H7" />
+  </>,
+);
+
+export const IconRedo = icon(
+  <>
+    <path d="m9.5 3.5 3.5 3.5-3.5 3.5" />
+    <path d="M13 7H6.5a3.5 3.5 0 0 0 0 7H9" />
+  </>,
+);
+
 export const IconRotateCw = icon(
   <>
     <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
