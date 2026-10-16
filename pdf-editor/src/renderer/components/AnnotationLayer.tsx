@@ -36,6 +36,31 @@ interface LayerProps {
   scale: number;
 }
 
+type DragState =
+  | {
+      mode: 'move-point';
+      id: string;
+      startX: number;
+      startY: number;
+      origX: number;
+      origY: number;
+    }
+  | {
+      mode: 'move-rect';
+      id: string;
+      startX: number;
+      startY: number;
+      orig: PdfRect;
+    }
+  | {
+      mode: 'resize-signature';
+      id: string;
+      startX: number;
+      startY: number;
+      orig: PdfRect;
+      corner: 'se';
+    };
+
 export function AnnotationLayer({ pageId, viewport, scale }: LayerProps) {
   const store = useStore();
   const state = useEditorState();
@@ -44,13 +69,7 @@ export function AnnotationLayer({ pageId, viewport, scale }: LayerProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [editor, setEditor] = useState<EditorSession | null>(null);
-  const dragRef = useRef<{
-    id: string;
-    startX: number;
-    startY: number;
-    origX: number;
-    origY: number;
-  } | null>(null);
+  const dragRef = useRef<DragState | null>(null);
 
   useEffect(() => {
     setDraft(null);
@@ -83,7 +102,7 @@ export function AnnotationLayer({ pageId, viewport, scale }: LayerProps) {
     e.preventDefault();
     if (tool === 'pen') {
       setDraft({ kind: 'pen', points: [x, y] });
-    } else {
+    } else if (tool === 'highlight' || tool === 'rect') {
       setDraft({ kind: tool, startX: x, startY: y, rect: { x, y, w: 0, h: 0 } });
     }
   };
@@ -144,12 +163,19 @@ export function AnnotationLayer({ pageId, viewport, scale }: LayerProps) {
       e.stopPropagation();
       store.selectAnnotation(ann.id);
       const [x, y] = toPdf(e.clientX, e.clientY);
-      dragRef.current = { id: ann.id, startX: x, startY: y, origX: ann.x, origY: ann.y };
+      dragRef.current = {
+        mode: 'move-point',
+        id: ann.id,
+        startX: x,
+        startY: y,
+        origX: ann.x,
+        origY: ann.y,
+      };
       e.currentTarget.setPointerCapture(e.pointerId);
     },
     onPointerMove: (e: ReactPointerEvent<Element>) => {
       const drag = dragRef.current;
-      if (!drag || drag.id !== ann.id) return;
+      if (!drag || drag.mode !== 'move-point' || drag.id !== ann.id) return;
       const [x, y] = toPdf(e.clientX, e.clientY);
       store.updateAnnotation(
         ann.id,
@@ -193,6 +219,20 @@ export function AnnotationLayer({ pageId, viewport, scale }: LayerProps) {
       case 'rect':
       case 'highlight':
         return viewportRect(viewport, ann.rect);
+      case 'ocr': {
+        if (ann.runs.length === 0) return null;
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const run of ann.runs) {
+          minX = Math.min(minX, run.rect.x);
+          minY = Math.min(minY, run.rect.y);
+          maxX = Math.max(maxX, run.rect.x + run.rect.w);
+          maxY = Math.max(maxY, run.rect.y + run.rect.h);
+        }
+        return viewportRect(viewport, { x: minX, y: minY, w: maxX - minX, h: maxY - minY });
+      }
       case 'pen': {
         let minX = Infinity;
         let minY = Infinity;
@@ -287,7 +327,33 @@ export function AnnotationLayer({ pageId, viewport, scale }: LayerProps) {
             ))}
           </text>
         )}
-        {box && (
+        {ann.kind === 'ocr' && (
+          <g className="ann-shape ann-ocr" {...selectOnlyHandlers(ann)}>
+            {ann.runs.map((run, i) => {
+              const boxRun = boxToSvg(viewportRect(viewport, run.rect));
+              return (
+                <g key={i}>
+                  <rect
+                    {...boxRun}
+                    fill="rgba(79, 140, 255, 0.12)"
+                    stroke="rgba(79, 140, 255, 0.35)"
+                    strokeWidth={0.75}
+                  />
+                  <text
+                    x={boxRun.x}
+                    y={boxRun.y + boxRun.height * 0.78}
+                    fill="rgba(20, 40, 90, 0.55)"
+                    fontSize={Math.max(7, run.fontSize * scale * 0.9)}
+                    style={{ userSelect: 'text' }}
+                  >
+                    {run.text}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
+        )}
+        {box && ann.kind !== 'ocr' && (
           <rect
             className="selection-outline"
             x={(box.left as number) - 3}

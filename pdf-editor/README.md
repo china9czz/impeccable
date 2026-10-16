@@ -26,9 +26,15 @@ document manipulation by `pdf-lib`. The UI is hand-written CSS, no framework.
 - **Add and edit text.** Click anywhere to place a text box with font-size and
   color options, including CJK text (bundled Noto Sans SC). Existing text boxes
   can be moved, edited and restyled; they are flattened into the PDF on save.
+- **OCR.** Recognize text on scanned / image-only pages with tesseract.js
+  (`chi_sim` + `eng`). Toolbar actions run OCR on the current page or the whole
+  document, with a status-bar progress indicator. Recognized words become an
+  overlay you can search immediately; on save they flatten to an invisible
+  extractable text layer so reopen keeps Chinese and English searchable.
 - **Undo/redo.** Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (or Ctrl+Y) cover every edit:
-  annotation create/edit/move/delete, rotate, delete, insert, reorder, merge.
-  Toolbar buttons show the same state. See "Undo model" below for the rules.
+  annotation create/edit/move/delete, rotate, delete, insert, reorder, merge,
+  OCR overlays. Toolbar buttons show the same state. See
+  "Undo model" below for the rules.
 - **Keyboard.** Ctrl/Cmd+O open, Ctrl/Cmd+S save, Ctrl/Cmd+Shift+S save as,
   Ctrl/Cmd+F search, Ctrl/Cmd +/- zoom, Delete removes the selected annotation.
 
@@ -140,6 +146,36 @@ The preload bridge is the only renderer-to-OS channel (context isolation on,
 node integration off). A browser fallback implementation of the same API lets
 the renderer run standalone for development and for the headless harnesses.
 
+## OCR (scanned pages)
+
+Uses [tesseract.js](https://github.com/naptha/tesseract.js) in the renderer with
+Chinese Simplified + English (`chi_sim+eng`).
+
+**Language packs.** Packs are not committed (they are ~30 MB gzipped). After
+clone, run:
+
+```bash
+npm run vendor-tessdata   # -> public/tessdata/{eng,chi_sim}.traineddata.gz
+```
+
+The OCR worker loads packs from `./tessdata` first (offline). If the folder is
+empty, tesseract.js will attempt its default CDN download on first use (needs
+network once, then caches).
+
+**Limits.**
+
+- Accuracy depends on scan quality, DPI, and contrast. The harness renders each
+  page at 2× before recognition; very small type or heavy skew will miss words.
+- Whole-document OCR is sequential and CPU-heavy; large books can take minutes.
+- OCR results are stored as page overlays until Save, then written as
+  **invisible** text (opacity 0) so the page look stays unchanged while search
+  and copy still work after reopen.
+- Confidence filter drops words below ~35; garbage glyphs are still possible on
+  noisy scans — spot-check before shipping a filed document.
+- Only `chi_sim` and `eng` are wired. Other languages need another traineddata
+  pack in `public/tessdata/` and a code change to the `LANG` constant in
+  `src/renderer/pdfcore/ocr.ts`.
+
 ## CJK / Unicode text
 
 Text boxes and sticky notes support Chinese (and any other BMP character
@@ -189,8 +225,8 @@ Ctrl/Cmd+Shift+Z / Ctrl+Y replays. The rules:
   moved or resized; notes and text boxes are movable.
 - Sticky notes flatten as visible marker + text (real popup annotation objects
   are not created).
-- Search operates on the extracted text layer; scanned/image-only PDFs have no
-  text layer to search.
+- Search operates on the extracted text layer plus any OCR overlays that have
+  not been saved yet. Run **OCR page** / **OCR all** on scanned PDFs first.
 - Coordinate mapping assumes pages whose MediaBox starts at the origin, which
   covers virtually all office PDFs but not every print-shop file.
 - Very large documents (hundreds of pages) work, but thumbnail rendering is

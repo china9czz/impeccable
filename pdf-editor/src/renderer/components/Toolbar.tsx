@@ -7,6 +7,7 @@ import {
   IconFitWidth,
   IconMerge,
   IconMinus,
+  IconOcr,
   IconOpen,
   IconPlus,
   IconRedo,
@@ -23,6 +24,7 @@ export function Toolbar({ onSplit }: { onSplit: () => void }) {
   const store = useStore();
   const state = useEditorState();
   const ready = state.phase === 'ready';
+  const ocrBusy = state.ocrProgress !== null;
   const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -101,6 +103,31 @@ export function Toolbar({ onSplit }: { onSplit: () => void }) {
         <button type="button" className="btn" disabled={!ready} onClick={onSplit} title="Export a page range as a new PDF">
           <IconSplit />
           <span>Split</span>
+        </button>
+      </div>
+
+      <div className="toolbar-divider" />
+
+      <div className="toolbar-group">
+        <button
+          type="button"
+          className="btn"
+          disabled={!ready || ocrBusy}
+          onClick={() => void store.runOcrCurrentPage()}
+          title="OCR current page (Chinese + English)"
+        >
+          <IconOcr />
+          <span>{ocrBusy && state.ocrProgress?.mode === 'page' ? 'OCR…' : 'OCR page'}</span>
+        </button>
+        <button
+          type="button"
+          className="btn"
+          disabled={!ready || ocrBusy}
+          onClick={() => void store.runOcrDocument()}
+          title="OCR every page (Chinese + English)"
+        >
+          <IconOcr />
+          <span>{ocrBusy && state.ocrProgress?.mode === 'document' ? `OCR ${state.ocrProgress.current}/${state.ocrProgress.total}` : 'OCR all'}</span>
         </button>
       </div>
 

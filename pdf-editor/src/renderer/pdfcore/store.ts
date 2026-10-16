@@ -11,8 +11,26 @@ import {
 } from './pdfjs';
 import { flattenAnnotations } from './flatten';
 import { loadCjkFont, needsCjk, onCjkFontLoaded, type CjkFontStatus } from './fonts';
+import { recognizeCanvas, type OcrPageResult } from './ocr';
 import { clamp, uid } from './coords';
-import type { Annotation, AnnotationPatch, FitMode, PageInfo, SearchMatch, Tool } from './types';
+import type {
+  Annotation,
+  AnnotationPatch,
+  FitMode,
+  OcrAnnotation,
+  PageInfo,
+  SearchMatch,
+  Tool,
+} from './types';
+
+export interface OcrProgressState {
+  mode: 'page' | 'document';
+  current: number;
+  total: number;
+  /** 0–1 within the current page (tesseract logger). */
+  pageFraction: number;
+  label: string;
+}
 
 export interface EditorState {
   phase: 'empty' | 'loading' | 'ready' | 'error';
@@ -43,6 +61,8 @@ export interface EditorState {
   cjkFontStatus: CjkFontStatus | null;
   canUndo: boolean;
   canRedo: boolean;
+  /** Non-null while OCR is running. */
+  ocrProgress: OcrProgressState | null;
 }
 
 const initialState: EditorState = {
@@ -70,6 +90,7 @@ const initialState: EditorState = {
   cjkFontStatus: 'loading',
   canUndo: false,
   canRedo: false,
+  ocrProgress: null,
 };
 
 /** One reversible mutation. Stack discipline keeps page references valid:
@@ -408,6 +429,7 @@ export class EditorStore {
     this.set(patch);
   }
 
+
   setColor(color: string): void {
     this.set({ color });
     const selected = this.getSelectedAnnotation();
@@ -680,10 +702,32 @@ export class EditorStore {
 
   private async getTextItems(index: number): Promise<PageTextItem[]> {
     const cached = this.textCache.get(index);
-    if (cached) return cached;
+    const base = cached ?? (await this.loadBaseTextItems(index));
+    // OCR runs live as annotations until save; merge them so search works
+    // immediately without waiting for flatten.
+    const pageId = this.pageIds[index];
+    if (!pageId) return base;
+    const ocrItems = this.ocrTextItemsForPage(pageId);
+    if (ocrItems.length === 0) return base;
+    return [...base, ...ocrItems];
+  }
+
+  private async loadBaseTextItems(index: number): Promise<PageTextItem[]> {
     const page = await this.getPdfPage(index);
     const items = await extractPageText(page);
     this.textCache.set(index, items);
+    return items;
+  }
+
+  private ocrTextItemsForPage(pageId: string): PageTextItem[] {
+    const items: PageTextItem[] = [];
+    for (const ann of this.getAnnotations(pageId)) {
+      if (ann.kind !== 'ocr') continue;
+      for (const run of ann.runs) {
+        if (!run.text) continue;
+        items.push({ str: run.text, rect: run.rect });
+      }
+    }
     return items;
   }
 
@@ -976,12 +1020,152 @@ export class EditorStore {
     await this.saveBytesAs(bytes, suggested, `Exported ${indices.length} page${indices.length === 1 ? '' : 's'}`);
   }
 
+  // -------------------------------------------------------------------- OCR
+
+  /** Render a page to an offscreen canvas at a fixed OCR scale and recognize. */
+  private async ocrPageIndex(
+    index: number,
+    onProgress?: (fraction: number, status: string) => void,
+  ): Promise<OcrPageResult> {
+    const page = await this.getPdfPage(index);
+    const ocrScale = 2;
+    const viewport = page.getViewport({ scale: ocrScale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Canvas 2D context unavailable');
+    const task = page.render({ canvasContext: ctx, viewport });
+    await task.promise;
+    return recognizeCanvas(canvas, viewport, ({ progress, status }) => {
+      onProgress?.(progress, status);
+    });
+  }
+
+  private applyOcrResult(pageId: string, result: OcrPageResult): void {
+    const existing = this.getAnnotations(pageId).find((a): a is OcrAnnotation => a.kind === 'ocr');
+    const runs = result.words.map((w) => ({
+      text: w.text,
+      rect: w.rect,
+      fontSize: w.fontSize,
+    }));
+    if (runs.length === 0) {
+      if (existing) this.deleteAnnotation(existing.id);
+      return;
+    }
+    if (existing) {
+      this.updateAnnotation(existing.id, { runs });
+    } else {
+      this.addAnnotation({
+        id: uid(),
+        pageId,
+        kind: 'ocr',
+        color: '#4f8cff',
+        runs,
+      });
+    }
+    // Invalidate search cache so the next query sees OCR text. Base pdf.js
+    // text stays cached; getTextItems merges OCR on the fly.
+    this.lastSearchQuery = '';
+  }
+
+  async runOcrCurrentPage(): Promise<void> {
+    if (this.state.phase !== 'ready' || this.state.ocrProgress) return;
+    const index = this.state.currentPage;
+    const pageId = this.pageIds[index];
+    if (!pageId) return;
+    this.set({
+      ocrProgress: {
+        mode: 'page',
+        current: 1,
+        total: 1,
+        pageFraction: 0,
+        label: `OCR page ${index + 1}…`,
+      },
+      statusMessage: `OCR page ${index + 1}…`,
+    });
+    try {
+      const result = await this.ocrPageIndex(index, (fraction, status) => {
+        this.set({
+          ocrProgress: {
+            mode: 'page',
+            current: 1,
+            total: 1,
+            pageFraction: fraction,
+            label: status,
+          },
+        });
+      });
+      this.applyOcrResult(pageId, result);
+      this.set({ ocrProgress: null });
+      this.status(
+        result.words.length > 0
+          ? `OCR page ${index + 1}: ${result.words.length} word${result.words.length === 1 ? '' : 's'}`
+          : `OCR page ${index + 1}: no text found`,
+      );
+    } catch (error) {
+      this.set({ ocrProgress: null });
+      this.status(`OCR failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async runOcrDocument(): Promise<void> {
+    if (this.state.phase !== 'ready' || this.state.ocrProgress) return;
+    const total = this.state.pageCount;
+    this.set({
+      ocrProgress: {
+        mode: 'document',
+        current: 0,
+        total,
+        pageFraction: 0,
+        label: `OCR document (0/${total})…`,
+      },
+      statusMessage: `OCR document (0/${total})…`,
+    });
+    let words = 0;
+    try {
+      for (let index = 0; index < total; index += 1) {
+        const pageId = this.pageIds[index];
+        if (!pageId) continue;
+        this.set({
+          ocrProgress: {
+            mode: 'document',
+            current: index + 1,
+            total,
+            pageFraction: 0,
+            label: `OCR page ${index + 1}/${total}…`,
+          },
+          statusMessage: `OCR page ${index + 1}/${total}…`,
+        });
+        const result = await this.ocrPageIndex(index, (fraction) => {
+          this.set({
+            ocrProgress: {
+              mode: 'document',
+              current: index + 1,
+              total,
+              pageFraction: fraction,
+              label: `OCR page ${index + 1}/${total}…`,
+            },
+          });
+        });
+        this.applyOcrResult(pageId, result);
+        words += result.words.length;
+      }
+      this.set({ ocrProgress: null });
+      this.status(`OCR complete: ${words} word${words === 1 ? '' : 's'} across ${total} pages`);
+    } catch (error) {
+      this.set({ ocrProgress: null });
+      this.status(`OCR failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   // ------------------------------------------------------------------ saving
 
   private anyCjkText(): boolean {
     for (const list of this.annotations.values()) {
       for (const ann of list) {
         if ((ann.kind === 'text' || ann.kind === 'note') && needsCjk(ann.text)) return true;
+        if (ann.kind === 'ocr' && ann.runs.some((r) => needsCjk(r.text))) return true;
       }
     }
     return false;

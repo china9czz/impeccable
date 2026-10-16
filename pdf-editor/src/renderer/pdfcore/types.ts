@@ -51,7 +51,25 @@ export interface TextAnnotation extends AnnotationBase {
   fontSize: number;
 }
 
-export type Annotation = RectAnnotation | PenAnnotation | NoteAnnotation | TextAnnotation;
+/** One OCR word/run produced by tesseract; flattened as invisible searchable text. */
+export interface OcrRun {
+  text: string;
+  rect: PdfRect;
+  fontSize: number;
+}
+
+export interface OcrAnnotation extends AnnotationBase {
+  kind: 'ocr';
+  runs: OcrRun[];
+}
+
+
+export type Annotation =
+  | RectAnnotation
+  | PenAnnotation
+  | NoteAnnotation
+  | TextAnnotation
+  | OcrAnnotation;
 
 /** Editable annotation fields (Omit over the union collapses to shared keys only). */
 export type AnnotationPatch = Partial<{
@@ -63,6 +81,7 @@ export type AnnotationPatch = Partial<{
   y: number;
   text: string;
   fontSize: number;
+  runs: OcrRun[];
 }>;
 
 export interface SearchMatch {

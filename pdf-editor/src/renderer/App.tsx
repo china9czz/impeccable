@@ -9,7 +9,7 @@ import { IconFilePdf, IconOpen } from './components/icons';
 import type { Tool } from './pdfcore/types';
 
 const TOOL_HINTS: Record<Tool, string> = {
-  select: 'Click an annotation to select it. Drag notes and text to move them. Double-click to edit.',
+  select: 'Click an annotation to select it. Drag notes, text and signatures to move them. Double-click to edit.',
   highlight: 'Drag across the page to paint a highlight.',
   pen: 'Drag to draw freehand.',
   note: 'Click anywhere to place a note.',
@@ -160,13 +160,28 @@ function EmptyState() {
 
 function StatusBar() {
   const state = useEditorState();
+  const ocr = state.ocrProgress;
+  const ocrPct = ocr
+    ? Math.round(((ocr.current - 1 + ocr.pageFraction) / Math.max(1, ocr.total)) * 100)
+    : 0;
   return (
     <footer className="status-bar">
       <span className="status-file">
         {state.fileName ?? 'No document'}
         {state.dirty && <span className="dirty-dot" title="Unsaved changes" />}
       </span>
-      <span className="status-message">{state.statusMessage}</span>
+      <span className="status-message">
+        {ocr ? (
+          <span className="ocr-progress">
+            <span className="ocr-progress-bar" style={{ width: `${Math.max(4, ocrPct)}%` }} />
+            <span className="ocr-progress-label">
+              {ocr.label} ({ocrPct}%)
+            </span>
+          </span>
+        ) : (
+          state.statusMessage
+        )}
+      </span>
       <span className="status-right">
         {state.cjkFontStatus === 'loading' && (
           <span className="status-meta font-loading">Loading CJK font…</span>

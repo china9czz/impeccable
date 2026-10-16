@@ -201,3 +201,19 @@ export const IconFilePdf = icon(
     <path d="M5.5 9.5v3M5.5 9.5h1.6a1.2 1.2 0 0 1 0 2.4H5.5" strokeWidth="1.1" />
   </>,
 );
+
+export const IconOcr = icon(
+  <>
+    <rect x="2.5" y="3" width="11" height="10" rx="1" />
+    <path d="M5 6.5h6" />
+    <path d="M5 9h4" />
+    <path d="M11.5 11.5 13.5 13.5" />
+  </>,
+);
+
+export const IconSignature = icon(
+  <>
+    <path d="M2.5 11.5c1.5-3 2.8-4.5 4-4.5 1.2 0 1.5 1.8 2.5 1.8s1.5-3 3.5-4" />
+    <path d="M2.5 13.5h11" />
+  </>,
+);

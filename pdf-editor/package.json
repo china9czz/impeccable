@@ -14,6 +14,8 @@
     "smoke-ops": "node scripts/smoke-ops.mjs",
     "screenshot": "node scripts/screenshot.mjs",
     "screenshot:web": "node scripts/screenshot-web.mjs",
+    "screenshot:v3": "node scripts/screenshot-v3.mjs",
+    "vendor-tessdata": "node scripts/vendor-tessdata.mjs",
     "test:e2e": "node scripts/e2e-web.mjs",
     "dist": "node scripts/build.mjs && electron-builder --publish never",
     "dist:win": "node scripts/build.mjs && electron-builder --win --publish never"
@@ -47,7 +49,8 @@
     "pdf-lib": "1.17.1",
     "pdfjs-dist": "4.10.38",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "tesseract.js": "^5.1.1"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

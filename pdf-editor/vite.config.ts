@@ -7,10 +7,17 @@ export default defineConfig({
   build: {
     outDir: 'dist/renderer',
     emptyOutDir: true,
-    chunkSizeWarningLimit: 1500,
+    // tesseract.js worker + wasm + CJK font push the main chunk up.
+    chunkSizeWarningLimit: 4000,
+  },
+  optimizeDeps: {
+    exclude: ['tesseract.js'],
   },
   server: {
     port: 5173,
     strictPort: true,
+  },
+  worker: {
+    format: 'es',
   },
 });

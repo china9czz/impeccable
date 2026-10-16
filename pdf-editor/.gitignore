@@ -8,3 +8,4 @@ src/renderer/assets/fonts/*.full.otf
 
 # electron-builder output
 release/
+public/tessdata/*.traineddata*

@@ -1,8 +1,8 @@
 import fontkit from '@pdf-lib/fontkit';
-import { LineCapStyle, PDFDocument, StandardFonts, rgb, type PDFFont } from 'pdf-lib';
+import { LineCapStyle, PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
 import type { Annotation } from './types';
 import { hexToRgb01, sanitizeWinAnsi, wrapText } from './coords';
-import { isWinAnsi } from './fonts';
+import { isWinAnsi, needsCjk } from './fonts';
 
 export interface FlattenOptions {
   /** Bundled CJK font bytes; when absent, non-WinAnsi text degrades to "?". */
@@ -34,7 +34,16 @@ export async function flattenAnnotations(
   const helvetica = await doc.embedFont(StandardFonts.Helvetica);
 
   let cjkFont: PDFFont | null = null;
-  if (options.cjkFontBytes) {
+  const needsFont =
+    Boolean(options.cjkFontBytes) &&
+    [...annotations.values()].some((list) =>
+      list.some((ann) => {
+        if (ann.kind === 'text' || ann.kind === 'note') return needsCjk(ann.text);
+        if (ann.kind === 'ocr') return ann.runs.some((r) => needsCjk(r.text));
+        return false;
+      }),
+    );
+  if (needsFont && options.cjkFontBytes) {
     try {
       doc.registerFontkit(fontkit);
       // Subset at embed time: only the glyphs actually drawn land in the PDF.
@@ -55,10 +64,11 @@ export async function flattenAnnotations(
 
   const pages = doc.getPages();
 
-  pageIds.forEach((pageId, index) => {
+  for (let index = 0; index < pageIds.length; index += 1) {
+    const pageId = pageIds[index]!;
     const page = pages[index];
     const anns = annotations.get(pageId);
-    if (!page || !anns || anns.length === 0) return;
+    if (!page || !anns || anns.length === 0) continue;
 
     for (const ann of anns) {
       const c = hexToRgb01(ann.color);
@@ -134,9 +144,32 @@ export async function flattenAnnotations(
           });
           break;
         }
+        case 'ocr':
+          // Invisible but extractable text layer so search works after save.
+          drawOcrRuns(page, ann.runs, prepare);
+          break;
       }
     }
-  });
+  }
 
   return { bytes: await doc.save(), degradedCjk };
+}
+
+function drawOcrRuns(
+  page: PDFPage,
+  runs: { text: string; rect: { x: number; y: number; w: number; h: number }; fontSize: number }[],
+  prepare: (text: string) => { text: string; font: PDFFont },
+): void {
+  for (const run of runs) {
+    const prepared = prepare(run.text);
+    const size = Math.max(4, Math.min(run.fontSize, run.rect.h * 0.95));
+    page.drawText(prepared.text, {
+      x: run.rect.x,
+      y: run.rect.y + Math.max(0, (run.rect.h - size) * 0.15),
+      size,
+      font: prepared.font,
+      color: rgb(0, 0, 0),
+      opacity: 0,
+    });
+  }
 }
