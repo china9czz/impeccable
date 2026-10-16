@@ -2,3 +2,6 @@ node_modules/
 dist/
 artifacts/
 *.log
+
+# vendor-font.mjs intermediate download (only the .subset.otf is committed)
+src/renderer/assets/fonts/*.full.otf

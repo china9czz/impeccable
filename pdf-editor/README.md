@@ -24,8 +24,8 @@ document manipulation by `pdf-lib`. The UI is hand-written CSS, no framework.
   color and stroke-width options. Drawn on an SVG overlay while editing and
   flattened into the page content stream on save.
 - **Add and edit text.** Click anywhere to place a text box with font-size and
-  color options. Existing text boxes can be moved, edited and restyled; they are
-  flattened into the PDF on save.
+  color options, including CJK text (bundled Noto Sans SC). Existing text boxes
+  can be moved, edited and restyled; they are flattened into the PDF on save.
 - **Keyboard.** Ctrl/Cmd+O open, Ctrl/Cmd+S save, Ctrl/Cmd+Shift+S save as,
   Ctrl/Cmd+F search, Ctrl/Cmd +/- zoom, Delete removes the selected annotation.
 
@@ -116,10 +116,30 @@ The preload bridge is the only renderer-to-OS channel (context isolation on,
 node integration off). A browser fallback implementation of the same API lets
 the renderer run standalone for development and for the headless harnesses.
 
+## CJK / Unicode text
+
+Text boxes and sticky notes support Chinese (and any other BMP character
+covered by Noto Sans SC). A subset of Noto Sans SC (SIL OFL 1.1, see
+`src/renderer/assets/fonts/OFL.txt`) is bundled at
+`src/renderer/assets/fonts/NotoSansSC-Regular.subset.otf` (~6 MB): Latin,
+punctuation, fullwidth forms, and the complete U+4E00-9FFF ideograph block.
+
+- The font is fetched **in the background** after startup; it never blocks
+  the app. The status bar shows `Loading CJK font…` until it is ready.
+- On save, text runs that fit WinAnsi use the standard Helvetica; runs with
+  CJK characters switch to the embedded Noto font, embedded **subset to the
+  glyphs actually used** (via `@pdf-lib/fontkit`), so saved files stay small.
+- If the font fails to load, saving still works: out-of-range characters fall
+  back to `?` and the status bar warns (`CJK font unavailable`).
+- To regenerate or upgrade the font: `node scripts/vendor-font.mjs`
+  (requires `pip install fonttools`; downloads Noto Sans SC and subsets it
+  with `--desubroutinize`, which avoids a pdf.js subrIndex rendering warning).
+
 ## Known limitations vs a full Acrobat-class editor
 
-- Flattened text uses the standard Helvetica font (WinAnsi). Non-Latin-1
-  characters are replaced with `?` on save; proper Unicode needs embedded TTFs.
+- One CJK font weight (Regular) is bundled; bold/italic text flattens in
+  Regular. Rare extension-B+ ideographs outside U+4E00-9FFF/F900-FAFF are not
+  covered.
 - No undo/redo yet, and no multi-page selection for bulk rotate/delete.
 - Rectangle, pen and highlight annotations can be deleted and recolored but not
   moved or resized; notes and text boxes are movable.

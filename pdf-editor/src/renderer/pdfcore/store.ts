@@ -10,6 +10,7 @@ import {
   type RenderTask,
 } from './pdfjs';
 import { flattenAnnotations } from './flatten';
+import { loadCjkFont, needsCjk, onCjkFontLoaded, type CjkFontStatus } from './fonts';
 import { clamp, uid } from './coords';
 import type { Annotation, AnnotationPatch, FitMode, PageInfo, SearchMatch, Tool } from './types';
 
@@ -38,6 +39,8 @@ export interface EditorState {
   scrollTarget: { page: number; seq: number } | null;
   statusMessage: string;
   errorMessage: string | null;
+  /** Bundled CJK font fetch state; null until the background load settles. */
+  cjkFontStatus: CjkFontStatus | null;
 }
 
 const initialState: EditorState = {
@@ -62,6 +65,7 @@ const initialState: EditorState = {
   scrollTarget: null,
   statusMessage: 'Open a PDF to begin',
   errorMessage: null,
+  cjkFontStatus: 'loading',
 };
 
 const MIN_SCALE = 0.25;
@@ -93,7 +97,12 @@ export class EditorStore {
   private notifiedFirstRender = false;
   private statusTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(private readonly platform: PdfEditorApi) {}
+  constructor(private readonly platform: PdfEditorApi) {
+    // Start the CJK font fetch immediately but never await it here: app
+    // startup must not block on a 6 MB asset. Save awaits it if needed.
+    void loadCjkFont();
+    onCjkFontLoaded((result) => this.set({ cjkFontStatus: result.status }));
+  }
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -613,9 +622,21 @@ export class EditorStore {
 
   // ------------------------------------------------------------------ saving
 
-  private async currentFlattenedBytes(): Promise<Uint8Array> {
+  private anyCjkText(): boolean {
+    for (const list of this.annotations.values()) {
+      for (const ann of list) {
+        if ((ann.kind === 'text' || ann.kind === 'note') && needsCjk(ann.text)) return true;
+      }
+    }
+    return false;
+  }
+
+  private async currentFlattenedBytes(): Promise<{ bytes: Uint8Array; degradedCjk: boolean }> {
     if (!this.bytes) throw new Error('No document open');
-    return flattenAnnotations(this.bytes, this.annotations, this.pageIds);
+    // Only wait on the font when the document actually contains CJK text;
+    // the fetch normally finished long ago in the background.
+    const cjkFontBytes = this.anyCjkText() ? (await loadCjkFont()).bytes : null;
+    return flattenAnnotations(this.bytes, this.annotations, this.pageIds, { cjkFontBytes });
   }
 
   private async saveBytesAs(bytes: Uint8Array, suggestedName: string, doneMessage: string): Promise<void> {
@@ -640,11 +661,15 @@ export class EditorStore {
     if (this.state.phase !== 'ready') return;
     try {
       this.set({ statusMessage: 'Saving...' });
-      const bytes = await this.currentFlattenedBytes();
+      const flattened = await this.currentFlattenedBytes();
+      const bytes = flattened.bytes;
+      const cjkNote = flattened.degradedCjk
+        ? ' — CJK font unavailable, non-Latin text saved as "?"'
+        : '';
       if (!saveAs && this.filePath) {
         await this.platform.writeFile(this.filePath, bytes);
         this.set({ dirty: false });
-        this.status(`Saved ${this.state.fileName ?? ''} (annotations flattened)`);
+        this.status(`Saved ${this.state.fileName ?? ''} (annotations flattened)${cjkNote}`);
         return;
       }
       const base = (this.state.fileName ?? 'document').replace(/\.pdf$/i, '');
@@ -657,11 +682,11 @@ export class EditorStore {
           dirty: false,
           fileName: chosen.split(/[\\/]/).pop() ?? chosen,
         });
-        this.status(`Saved ${chosen}`);
+        this.status(`Saved ${chosen}${cjkNote}`);
       } else if (!this.isElectron) {
         await this.platform.writeFile(suggested, bytes);
         this.set({ dirty: false });
-        this.status(`Downloaded ${suggested}`);
+        this.status(`Downloaded ${suggested}${cjkNote}`);
       } else {
         this.status('Save cancelled');
       }

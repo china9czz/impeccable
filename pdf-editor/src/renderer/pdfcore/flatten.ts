@@ -1,6 +1,19 @@
-import { LineCapStyle, PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
+import { LineCapStyle, PDFDocument, StandardFonts, rgb, type PDFFont } from 'pdf-lib';
 import type { Annotation } from './types';
 import { hexToRgb01, sanitizeWinAnsi, wrapText } from './coords';
+import { isWinAnsi } from './fonts';
+
+export interface FlattenOptions {
+  /** Bundled CJK font bytes; when absent, non-WinAnsi text degrades to "?". */
+  cjkFontBytes?: Uint8Array | null;
+}
+
+export interface FlattenResult {
+  bytes: Uint8Array;
+  /** True when non-WinAnsi text had to be replaced because no CJK font was available. */
+  degradedCjk: boolean;
+}
 
 /**
  * Bake all annotations into a copy of the document and return the final
@@ -11,13 +24,35 @@ export async function flattenAnnotations(
   bytes: Uint8Array,
   annotations: ReadonlyMap<string, Annotation[]>,
   pageIds: readonly string[],
-): Promise<Uint8Array> {
+  options: FlattenOptions = {},
+): Promise<FlattenResult> {
   let total = 0;
   for (const list of annotations.values()) total += list.length;
-  if (total === 0) return bytes;
+  if (total === 0) return { bytes, degradedCjk: false };
 
   const doc = await PDFDocument.load(bytes);
-  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const helvetica = await doc.embedFont(StandardFonts.Helvetica);
+
+  let cjkFont: PDFFont | null = null;
+  if (options.cjkFontBytes) {
+    try {
+      doc.registerFontkit(fontkit);
+      // Subset at embed time: only the glyphs actually drawn land in the PDF.
+      cjkFont = await doc.embedFont(options.cjkFontBytes, { subset: true });
+    } catch {
+      cjkFont = null;
+    }
+  }
+
+  let degradedCjk = false;
+  /** Pick a font per run; sanitize only when the CJK font is unavailable. */
+  const prepare = (text: string): { text: string; font: PDFFont } => {
+    if (isWinAnsi(text)) return { text, font: helvetica };
+    if (cjkFont) return { text, font: cjkFont };
+    degradedCjk = true;
+    return { text: sanitizeWinAnsi(text), font: helvetica };
+  };
+
   const pages = doc.getPages();
 
   pageIds.forEach((pageId, index) => {
@@ -73,11 +108,12 @@ export async function flattenAnnotations(
           });
           const lines = wrapText(ann.text, 48);
           lines.forEach((line, li) => {
-            page.drawText(sanitizeWinAnsi(line), {
+            const run = prepare(line);
+            page.drawText(run.text, {
               x: ann.x + marker + 9,
               y: ann.y - 10 - li * 12.5,
               size: 9.5,
-              font,
+              font: run.font,
               color: rgb(0.15, 0.15, 0.15),
             });
           });
@@ -87,11 +123,12 @@ export async function flattenAnnotations(
           const lines = ann.text.split('\n');
           lines.forEach((line, li) => {
             const baseline = ann.y - ann.fontSize * 0.8 - li * ann.fontSize * 1.25;
-            page.drawText(sanitizeWinAnsi(line), {
+            const run = prepare(line);
+            page.drawText(run.text, {
               x: ann.x,
               y: baseline,
               size: ann.fontSize,
-              font,
+              font: run.font,
               color,
             });
           });
@@ -101,5 +138,5 @@ export async function flattenAnnotations(
     }
   });
 
-  return doc.save();
+  return { bytes: await doc.save(), degradedCjk };
 }

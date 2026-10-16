@@ -90,6 +90,15 @@ try {
   let s = await state(page);
   check(s.pageCount === 6, `opens sample with 6 pages (got ${s.pageCount})`);
   check((await page.locator('.thumb').count()) === 6, 'sidebar shows 6 thumbnails');
+  await page
+    .waitForFunction(
+      () => ['ready', 'error'].includes(window.__vellumStore.getState().cjkFontStatus),
+      null,
+      { timeout: 30_000 },
+    )
+    .catch(() => {});
+  const fontStatus = await page.evaluate(() => window.__vellumStore.getState().cjkFontStatus);
+  check(fontStatus === 'ready', `bundled CJK font loads in background (status=${fontStatus})`);
 
   // ------------------------------------------------------------ 2. search
   console.log('search');
@@ -149,9 +158,22 @@ try {
   await page.fill('.inline-editor textarea', 'E2E added text');
   await page.click('.mini-btn.primary');
 
-  await page.waitForFunction(() => window.__vellumStore.annotationCount() >= 5, null, { timeout: 5000 });
+  // CJK text box + note: the save check below proves the bundled font embeds.
+  await tool('Text');
+  await page.mouse.click(...px(0.4, 0.92));
+  await page.waitForSelector('.inline-editor textarea', { timeout: 5000 });
+  await page.fill('.inline-editor textarea', '你好，Vellum！中文保存测试');
+  await page.click('.mini-btn.primary');
+
+  await tool('Note');
+  await page.mouse.click(...px(0.7, 0.15));
+  await page.waitForSelector('.inline-editor textarea', { timeout: 5000 });
+  await page.fill('.inline-editor textarea', '批注：中文便签内容');
+  await page.click('.mini-btn.primary');
+
+  await page.waitForFunction(() => window.__vellumStore.annotationCount() >= 7, null, { timeout: 5000 });
   s = await state(page);
-  check(s.annotations >= 5, `five annotations created (got ${s.annotations})`);
+  check(s.annotations >= 7, `seven annotations created incl. CJK (got ${s.annotations})`);
   check((await page.locator('.ann-shape').count()) >= 5, 'annotations render on the overlay layer');
   check(s.dirty, 'document marked dirty after annotating');
 
@@ -241,11 +263,42 @@ try {
     const content = await pdfPage.getTextContent();
     allText += content.items.map((item) => item.str).join(' ') + '\n';
   }
+  const compact = allText.replace(/\s+/g, '');
   check(allText.includes('E2E added text'), 'flattened text box is real text in the saved PDF');
   check(allText.includes('Test note from E2E'), 'flattened note is real text in the saved PDF');
+  check(compact.includes('你好，Vellum！中文保存测试'), 'flattened CJK text is real text (bundled font embedded)');
+  check(compact.includes('批注：中文便签内容'), 'flattened CJK note is real text');
+  check(!compact.includes('???'), 'no "?" substitution of CJK characters');
   check(allText.includes('needle'), 'original text layer intact after flattening');
   s = await state(page);
   check(!s.dirty, 'dirty flag cleared after save');
+
+  // ------------------------------------- 7b. reopen saved file (CJK roundtrip)
+  console.log('reopen saved PDF');
+  await page.evaluate((b64) => {
+    const bin = atob(b64);
+    const data = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) data[i] = bin.charCodeAt(i);
+    return window.__vellumStore.openFile({ path: '', name: 'saved-cjk.pdf', data });
+  }, savedBytes.toString('base64'));
+  await page.waitForFunction(
+    () => window.__vellumStore.getState().phase === 'ready' &&
+      window.__vellumStore.getState().fileName === 'saved-cjk.pdf',
+    null,
+    { timeout: 20_000 },
+  );
+  await page.waitForSelector('canvas.page-canvas', { timeout: 20_000 });
+  s = await state(page);
+  check(s.pageCount === 6, `reopened saved PDF with 6 pages (got ${s.pageCount})`);
+  check(s.annotations === 0, 'annotations are flattened, not editable overlays, after reopen');
+  await page.fill('#search-input', '中文保存测试');
+  await page.press('#search-input', 'Enter');
+  await page.waitForFunction(() => window.__vellumStore.getState().searchMatches.length > 0, null, { timeout: 20_000 });
+  s = await state(page);
+  check(s.matches >= 1, `CJK text searchable in reopened PDF (${s.matches} matches)`);
+  await page.waitForSelector('.search-hit', { timeout: 20_000 });
+  check((await page.locator('.search-hit').count()) > 0, 'CJK search hit highlighted after reopen');
+  await page.evaluate(() => window.__vellumStore.clearSearch());
 
   // --------------------------------------------------------------- 8. merge
   console.log('merge');

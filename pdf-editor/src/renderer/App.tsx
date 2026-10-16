@@ -160,6 +160,14 @@ function StatusBar() {
       </span>
       <span className="status-message">{state.statusMessage}</span>
       <span className="status-right">
+        {state.cjkFontStatus === 'loading' && (
+          <span className="status-meta font-loading">Loading CJK font…</span>
+        )}
+        {state.cjkFontStatus === 'error' && (
+          <span className="status-meta font-error" title="Chinese/Japanese/Korean text will be saved as '?' — the bundled font failed to load.">
+            CJK font unavailable
+          </span>
+        )}
         {state.phase === 'ready' && (
           <>
             <span className="status-hint">{TOOL_HINTS[state.tool]}</span>

@@ -21,14 +21,34 @@ export function sanitizeWinAnsi(text: string): string {
   return text.replace(/[^\x20-\x7E\xA0-\xFF]/g, '?');
 }
 
-export function wrapText(text: string, maxChars: number): string[] {
+/** Column width of one code point: CJK ideographs and fullwidth forms take 2. */
+function charCols(code: number): number {
+  return (code >= 0x2e80 && code <= 0x9fff) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xff00 && code <= 0xff60)
+    ? 2
+    : 1;
+}
+
+export function wrapText(text: string, maxCols: number): string[] {
   const out: string[] = [];
   for (const rawLine of text.split('\n')) {
-    let line = rawLine;
-    while (line.length > maxChars) {
-      const cut = line.lastIndexOf(' ', maxChars);
-      out.push(line.slice(0, cut > 0 ? cut : maxChars));
-      line = line.slice(cut > 0 ? cut + 1 : maxChars);
+    let line = '';
+    let cols = 0;
+    let lastSpace = -1;
+    for (const ch of rawLine) {
+      const w = charCols(ch.codePointAt(0) ?? 0);
+      if (cols + w > maxCols && line.length > 0) {
+        const cut = lastSpace > 0 ? lastSpace : line.length;
+        out.push(line.slice(0, cut));
+        line = line.slice(cut).replace(/^ /, '') + ch;
+        cols = [...line].reduce((acc, c) => acc + charCols(c.codePointAt(0) ?? 0), 0);
+        lastSpace = line.lastIndexOf(' ');
+      } else {
+        line += ch;
+        cols += w;
+        if (ch === ' ') lastSpace = line.length - 1;
+      }
     }
     out.push(line);
   }
