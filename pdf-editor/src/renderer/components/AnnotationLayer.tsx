@@ -12,6 +12,7 @@ import type {
   Annotation,
   NoteAnnotation,
   PdfRect,
+  SignatureAnnotation,
   TextAnnotation,
 } from '../pdfcore/types';
 import { boxToSvg, viewportRect, type VpBox } from './PageView';
@@ -94,6 +95,13 @@ export function AnnotationLayer({ pageId, viewport, scale }: LayerProps) {
   const onPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
     if (e.button !== 0 || tool === 'select') return;
     const [x, y] = toPdf(e.clientX, e.clientY);
+    if (tool === 'signature') {
+      const dataUrl = state.pendingSignatureDataUrl;
+      if (dataUrl) {
+        store.placeSignature(pageId, dataUrl, { x, y });
+      }
+      return;
+    }
     if (tool === 'note' || tool === 'text') {
       setEditor({ mode: 'create', kind: tool, x, y, text: '', fontSize: state.fontSize });
       return;
@@ -204,6 +212,85 @@ export function AnnotationLayer({ pageId, viewport, scale }: LayerProps) {
     },
   });
 
+  const signatureHandlers = (ann: SignatureAnnotation) => ({
+    onPointerDown: (e: ReactPointerEvent<Element>) => {
+      if (tool !== 'select' || e.button !== 0) return;
+      e.stopPropagation();
+      store.selectAnnotation(ann.id);
+      const [x, y] = toPdf(e.clientX, e.clientY);
+      dragRef.current = {
+        mode: 'move-rect',
+        id: ann.id,
+        startX: x,
+        startY: y,
+        orig: { ...ann.rect },
+      };
+      e.currentTarget.setPointerCapture(e.pointerId);
+    },
+    onPointerMove: (e: ReactPointerEvent<Element>) => {
+      const drag = dragRef.current;
+      if (!drag || drag.mode !== 'move-rect' || drag.id !== ann.id) return;
+      const [x, y] = toPdf(e.clientX, e.clientY);
+      store.updateAnnotation(
+        ann.id,
+        {
+          rect: {
+            ...drag.orig,
+            x: drag.orig.x + (x - drag.startX),
+            y: drag.orig.y + (y - drag.startY),
+          },
+        },
+        { coalesceKey: `move:${ann.id}` },
+      );
+    },
+    onPointerUp: () => {
+      dragRef.current = null;
+    },
+  });
+
+  const resizeSignature = (ann: SignatureAnnotation) => ({
+    onPointerDown: (e: ReactPointerEvent<Element>) => {
+      if (tool !== 'select' || e.button !== 0) return;
+      e.stopPropagation();
+      store.selectAnnotation(ann.id);
+      const [x, y] = toPdf(e.clientX, e.clientY);
+      dragRef.current = {
+        mode: 'resize-signature',
+        id: ann.id,
+        startX: x,
+        startY: y,
+        orig: { ...ann.rect },
+        corner: 'se',
+      };
+      e.currentTarget.setPointerCapture(e.pointerId);
+    },
+    onPointerMove: (e: ReactPointerEvent<Element>) => {
+      const drag = dragRef.current;
+      if (!drag || drag.mode !== 'resize-signature' || drag.id !== ann.id) return;
+      const [x, y] = toPdf(e.clientX, e.clientY);
+      const dx = x - drag.startX;
+      const dy = y - drag.startY;
+      // SE handle: grow width, shrink bottom-left y (PDF coords).
+      const w = Math.max(24, drag.orig.w + dx);
+      const h = Math.max(12, drag.orig.h - dy);
+      store.updateAnnotation(
+        ann.id,
+        {
+          rect: {
+            x: drag.orig.x,
+            y: drag.orig.y + drag.orig.h - h,
+            w,
+            h,
+          },
+        },
+        { coalesceKey: `resize:${ann.id}` },
+      );
+    },
+    onPointerUp: () => {
+      dragRef.current = null;
+    },
+  });
+
   const selectOnlyHandlers = (ann: Annotation) => ({
     onPointerDown: (e: ReactPointerEvent<Element>) => {
       if (tool !== 'select' || e.button !== 0) return;
@@ -218,6 +305,7 @@ export function AnnotationLayer({ pageId, viewport, scale }: LayerProps) {
     switch (ann.kind) {
       case 'rect':
       case 'highlight':
+      case 'signature':
         return viewportRect(viewport, ann.rect);
       case 'ocr': {
         if (ann.runs.length === 0) return null;
@@ -353,6 +441,28 @@ export function AnnotationLayer({ pageId, viewport, scale }: LayerProps) {
             })}
           </g>
         )}
+        {ann.kind === 'signature' && (() => {
+          const sigBox = boxToSvg(viewportRect(viewport, ann.rect));
+          return (
+            <g className="ann-shape ann-signature" {...signatureHandlers(ann)}>
+              <image
+                href={ann.imageDataUrl}
+                {...sigBox}
+                preserveAspectRatio="none"
+              />
+              {selected && (
+                <rect
+                  className="signature-resize-handle"
+                  x={sigBox.x + sigBox.width - 6}
+                  y={sigBox.y + sigBox.height - 6}
+                  width={12}
+                  height={12}
+                  {...resizeSignature(ann)}
+                />
+              )}
+            </g>
+          );
+        })()}
         {box && ann.kind !== 'ocr' && (
           <rect
             className="selection-outline"

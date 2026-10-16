@@ -31,9 +31,14 @@ document manipulation by `pdf-lib`. The UI is hand-written CSS, no framework.
   document, with a status-bar progress indicator. Recognized words become an
   overlay you can search immediately; on save they flatten to an invisible
   extractable text layer so reopen keeps Chinese and English searchable.
+- **Electronic signature.** Draw a signature or upload PNG/SVG, place it on a
+  page with drag/resize, or stamp every page at once. Signatures can be reused
+  from `localStorage` within the browser profile. Place / move / delete go
+  through the same undo/redo stack as other annotations; save flattens the
+  image into the page.
 - **Undo/redo.** Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (or Ctrl+Y) cover every edit:
   annotation create/edit/move/delete, rotate, delete, insert, reorder, merge,
-  OCR overlays. Toolbar buttons show the same state. See
+  OCR overlays and signatures. Toolbar buttons show the same state. See
   "Undo model" below for the rules.
 - **Keyboard.** Ctrl/Cmd+O open, Ctrl/Cmd+S save, Ctrl/Cmd+Shift+S save as,
   Ctrl/Cmd+F search, Ctrl/Cmd +/- zoom, Delete removes the selected annotation.
@@ -175,6 +180,17 @@ network once, then caches).
 - Only `chi_sim` and `eng` are wired. Other languages need another traineddata
   pack in `public/tessdata/` and a code change to the `LANG` constant in
   `src/renderer/pdfcore/ocr.ts`.
+
+## Electronic signature
+
+Open **Sign** in the toolbar to draw on the pad or upload a PNG/SVG (SVG is
+rasterized to PNG for embedding). Then click a page to place, or use **Stamp
+all** on a saved signature to drop the same image on every page (lower-right
+margin). Drag to move; the corner handle resizes. Saved strokes live in
+`localStorage` (`vellum.signatures.v1`, up to 8) for the current browser
+profile — not synced across machines. Flatten on save embeds the PNG via
+pdf-lib; this is an electronic image stamp, not a cryptographic digital
+signature (certificate-based signing is out of scope).
 
 ## CJK / Unicode text
 

@@ -20,6 +20,7 @@ import type {
   OcrAnnotation,
   PageInfo,
   SearchMatch,
+  SignatureAnnotation,
   Tool,
 } from './types';
 
@@ -63,6 +64,11 @@ export interface EditorState {
   canRedo: boolean;
   /** Non-null while OCR is running. */
   ocrProgress: OcrProgressState | null;
+  /**
+   * When the signature tool is active, a click on a page places this image.
+   * Cleared after place; stamp-all uses it without clearing until cancelled.
+   */
+  pendingSignatureDataUrl: string | null;
 }
 
 const initialState: EditorState = {
@@ -91,6 +97,7 @@ const initialState: EditorState = {
   canUndo: false,
   canRedo: false,
   ocrProgress: null,
+  pendingSignatureDataUrl: null,
 };
 
 /** One reversible mutation. Stack discipline keeps page references valid:
@@ -426,9 +433,17 @@ export class EditorStore {
     if ((tool === 'text' || tool === 'pen' || tool === 'rect') && this.state.color === '#ffd400') {
       patch.color = tool === 'text' ? '#111827' : '#ff5a52';
     }
+    if (tool !== 'signature') patch.pendingSignatureDataUrl = null;
     this.set(patch);
   }
 
+  setPendingSignature(dataUrl: string | null): void {
+    this.set({
+      pendingSignatureDataUrl: dataUrl,
+      tool: dataUrl ? 'signature' : this.state.tool === 'signature' ? 'select' : this.state.tool,
+      selectedAnnotationId: null,
+    });
+  }
 
   setColor(color: string): void {
     this.set({ color });
@@ -1157,6 +1172,68 @@ export class EditorStore {
       this.set({ ocrProgress: null });
       this.status(`OCR failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  // ------------------------------------------------------------- signature
+
+  /**
+   * Place a signature annotation on a page. `anchor` is the click point in
+   * PDF user space (top-left of the image box); default size ~140×48 pt.
+   */
+  placeSignature(
+    pageId: string,
+    imageDataUrl: string,
+    anchor: { x: number; y: number },
+    opts?: { w?: number; h?: number; select?: boolean },
+  ): string {
+    const w = opts?.w ?? 140;
+    const h = opts?.h ?? 48;
+    const ann: SignatureAnnotation = {
+      id: uid(),
+      pageId,
+      kind: 'signature',
+      color: '#111827',
+      imageDataUrl,
+      rect: { x: anchor.x, y: anchor.y - h, w, h },
+    };
+    this.addAnnotation(ann);
+    if (opts?.select !== false) {
+      this.set({ selectedAnnotationId: ann.id, tool: 'select', pendingSignatureDataUrl: null });
+    }
+    return ann.id;
+  }
+
+  /** Stamp the same signature image onto every page (or a page-index list). */
+  stampSignatureOnPages(imageDataUrl: string, pageIndices?: number[]): number {
+    const indices =
+      pageIndices ?? Array.from({ length: this.state.pageCount }, (_, i) => i);
+    let placed = 0;
+    let lastId: string | null = null;
+    for (const index of indices) {
+      const pageId = this.pageIds[index];
+      const info = this.pageInfos[index];
+      if (!pageId || !info) continue;
+      const w = 140;
+      const h = 48;
+      const margin = 36;
+      lastId = this.placeSignature(
+        pageId,
+        imageDataUrl,
+        {
+          x: Math.max(margin, info.width - w - margin),
+          y: margin + h,
+        },
+        { w, h, select: false },
+      );
+      placed += 1;
+    }
+    this.set({
+      selectedAnnotationId: lastId,
+      tool: 'select',
+      pendingSignatureDataUrl: null,
+    });
+    this.status(`Stamped signature on ${placed} page${placed === 1 ? '' : 's'}`);
+    return placed;
   }
 
   // ------------------------------------------------------------------ saving

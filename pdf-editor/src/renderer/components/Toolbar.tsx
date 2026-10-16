@@ -14,13 +14,20 @@ import {
   IconSave,
   IconSaveAs,
   IconSearch,
+  IconSignature,
   IconSplit,
   IconUndo,
 } from './icons';
 
 const ZOOM_PRESETS = [50, 75, 100, 125, 150, 200, 300, 400];
 
-export function Toolbar({ onSplit }: { onSplit: () => void }) {
+export function Toolbar({
+  onSplit,
+  onSignature,
+}: {
+  onSplit: () => void;
+  onSignature: () => void;
+}) {
   const store = useStore();
   const state = useEditorState();
   const ready = state.phase === 'ready';
@@ -128,6 +135,16 @@ export function Toolbar({ onSplit }: { onSplit: () => void }) {
         >
           <IconOcr />
           <span>{ocrBusy && state.ocrProgress?.mode === 'document' ? `OCR ${state.ocrProgress.current}/${state.ocrProgress.total}` : 'OCR all'}</span>
+        </button>
+        <button
+          type="button"
+          className={`btn${state.tool === 'signature' || state.pendingSignatureDataUrl ? ' active' : ''}`}
+          disabled={!ready}
+          onClick={onSignature}
+          title="Draw or upload an electronic signature"
+        >
+          <IconSignature />
+          <span>Sign</span>
         </button>
       </div>
 

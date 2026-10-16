@@ -1,5 +1,5 @@
 import fontkit from '@pdf-lib/fontkit';
-import { LineCapStyle, PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
+import { LineCapStyle, PDFDocument, StandardFonts, rgb, type PDFFont, type PDFImage, type PDFPage } from 'pdf-lib';
 import type { Annotation } from './types';
 import { hexToRgb01, sanitizeWinAnsi, wrapText } from './coords';
 import { isWinAnsi, needsCjk } from './fonts';
@@ -13,6 +13,20 @@ export interface FlattenResult {
   bytes: Uint8Array;
   /** True when non-WinAnsi text had to be replaced because no CJK font was available. */
   degradedCjk: boolean;
+}
+
+function dataUrlToBytes(dataUrl: string): Uint8Array {
+  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(dataUrl);
+  if (!match) throw new Error('Invalid image data URL');
+  const isBase64 = Boolean(match[2]);
+  const payload = match[3] ?? '';
+  if (isBase64) {
+    const bin = atob(payload);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  return new TextEncoder().encode(decodeURIComponent(payload));
 }
 
 /**
@@ -60,6 +74,17 @@ export async function flattenAnnotations(
     if (cjkFont) return { text, font: cjkFont };
     degradedCjk = true;
     return { text: sanitizeWinAnsi(text), font: helvetica };
+  };
+
+  const imageCache = new Map<string, PDFImage>();
+  const embedImage = async (dataUrl: string): Promise<PDFImage> => {
+    const cached = imageCache.get(dataUrl);
+    if (cached) return cached;
+    const raw = dataUrlToBytes(dataUrl);
+    const isJpeg = /^data:image\/jpe?g/i.test(dataUrl);
+    const image = isJpeg ? await doc.embedJpg(raw) : await doc.embedPng(raw);
+    imageCache.set(dataUrl, image);
+    return image;
   };
 
   const pages = doc.getPages();
@@ -148,6 +173,20 @@ export async function flattenAnnotations(
           // Invisible but extractable text layer so search works after save.
           drawOcrRuns(page, ann.runs, prepare);
           break;
+        case 'signature': {
+          try {
+            const image = await embedImage(ann.imageDataUrl);
+            page.drawImage(image, {
+              x: ann.rect.x,
+              y: ann.rect.y,
+              width: ann.rect.w,
+              height: ann.rect.h,
+            });
+          } catch {
+            // Skip broken image data rather than failing the whole save.
+          }
+          break;
+        }
       }
     }
   }

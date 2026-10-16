@@ -4,7 +4,7 @@
  * so they are resolution independent and survive zoom and rotation.
  */
 
-export type Tool = 'select' | 'highlight' | 'pen' | 'note' | 'rect' | 'text';
+export type Tool = 'select' | 'highlight' | 'pen' | 'note' | 'rect' | 'text' | 'signature';
 
 export interface PdfRect {
   x: number;
@@ -63,13 +63,21 @@ export interface OcrAnnotation extends AnnotationBase {
   runs: OcrRun[];
 }
 
+/** Drawn or uploaded signature image, placed as a resizable stamp. */
+export interface SignatureAnnotation extends AnnotationBase {
+  kind: 'signature';
+  rect: PdfRect;
+  /** PNG (or rasterized SVG) data URL. */
+  imageDataUrl: string;
+}
 
 export type Annotation =
   | RectAnnotation
   | PenAnnotation
   | NoteAnnotation
   | TextAnnotation
-  | OcrAnnotation;
+  | OcrAnnotation
+  | SignatureAnnotation;
 
 /** Editable annotation fields (Omit over the union collapses to shared keys only). */
 export type AnnotationPatch = Partial<{
@@ -82,6 +90,7 @@ export type AnnotationPatch = Partial<{
   text: string;
   fontSize: number;
   runs: OcrRun[];
+  imageDataUrl: string;
 }>;
 
 export interface SearchMatch {

@@ -5,6 +5,7 @@ import { ToolBar } from './components/AnnotationToolBar';
 import { Sidebar } from './components/Sidebar';
 import { PageView } from './components/PageView';
 import { SplitDialog } from './components/SplitDialog';
+import { SignatureDialog } from './components/SignatureDialog';
 import { IconFilePdf, IconOpen } from './components/icons';
 import type { Tool } from './pdfcore/types';
 
@@ -15,6 +16,7 @@ const TOOL_HINTS: Record<Tool, string> = {
   note: 'Click anywhere to place a note.',
   rect: 'Drag to draw a rectangle.',
   text: 'Click anywhere to add a text box.',
+  signature: 'Click the page to place the prepared signature. Drag to move; use the corner handle to resize.',
 };
 
 export default function App() {
@@ -22,6 +24,7 @@ export default function App() {
   const state = useEditorState();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [splitOpen, setSplitOpen] = useState(false);
+  const [signatureOpen, setSignatureOpen] = useState(false);
 
   // Track the page area's size so fit-width / fit-page can compute scale.
   useEffect(() => {
@@ -107,7 +110,7 @@ export default function App() {
 
   return (
     <div className="app" onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
-      <Toolbar onSplit={() => setSplitOpen(true)} />
+      <Toolbar onSplit={() => setSplitOpen(true)} onSignature={() => setSignatureOpen(true)} />
       <ToolBar />
       <div className="app-body">
         <Sidebar />
@@ -127,6 +130,7 @@ export default function App() {
       </div>
       <StatusBar />
       {splitOpen && <SplitDialog onClose={() => setSplitOpen(false)} />}
+      {signatureOpen && <SignatureDialog onClose={() => setSignatureOpen(false)} />}
     </div>
   );
 }
