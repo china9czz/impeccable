@@ -84,6 +84,27 @@ Note: in restricted sandboxes (gVisor-style), Electron's Chromium cannot create
 shared memory and the renderer crashes; use the `*:web` harnesses there. On a
 normal desktop, `npm run dev` and `npm start` work directly.
 
+## Packaging (Windows)
+
+electron-builder produces Windows artifacts from any OS:
+
+```bash
+npm run dist:win    # build + package -> release/
+```
+
+Outputs (x64):
+
+- `release/Vellum PDF Setup <version>.exe` — NSIS installer (default target;
+  lets the user pick the install directory, creates a Start Menu shortcut).
+- `release/Vellum PDF-<version>-win.zip` — portable build, no install needed.
+
+Building NSIS on Linux/macOS needs Wine (`sudo apt install wine wine32:i386`
+on Ubuntu, with the i386 architecture enabled); without it electron-builder
+fails while editing the installer metadata. The zip target works Wine-free on
+older electron-builder versions but current versions also shell out to Wine
+for the executable, so install Wine either way. Artifacts are unsigned; Windows
+SmartScreen will warn until the app is code-signed.
+
 ## Project layout
 
 ```

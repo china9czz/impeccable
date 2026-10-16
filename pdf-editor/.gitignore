@@ -5,3 +5,6 @@ artifacts/
 
 # vendor-font.mjs intermediate download (only the .subset.otf is committed)
 src/renderer/assets/fonts/*.full.otf
+
+# electron-builder output
+release/
