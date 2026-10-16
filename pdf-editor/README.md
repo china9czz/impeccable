@@ -156,16 +156,18 @@ the renderer run standalone for development and for the headless harnesses.
 Uses [tesseract.js](https://github.com/naptha/tesseract.js) in the renderer with
 Chinese Simplified + English (`chi_sim+eng`).
 
-**Language packs.** Packs are not committed (they are ~30 MB gzipped). After
-clone, run:
+**Language packs and runtime.** Packs and the tesseract worker/wasm are not
+committed (~40 MB). After clone, run:
 
 ```bash
-npm run vendor-tessdata   # -> public/tessdata/{eng,chi_sim}.traineddata.gz
+npm run vendor-tessdata
+# -> public/tessdata/{eng,chi_sim}.traineddata.gz
+# -> public/tesseract/{worker.min.js, *.wasm, *.wasm.js}
 ```
 
-The OCR worker loads packs from `./tessdata` first (offline). If the folder is
-empty, tesseract.js will attempt its default CDN download on first use (needs
-network once, then caches).
+OCR prefers those local files (fully offline once vendored). If they are
+missing, it falls back to jsDelivr for worker/core/lang on first use (needs
+network once; the browser may cache afterwards).
 
 **Limits.**
 

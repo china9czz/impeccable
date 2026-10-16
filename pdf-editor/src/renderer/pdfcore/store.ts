@@ -826,6 +826,7 @@ export class EditorStore {
   }
 
   clearSearch(): void {
+    this.lastSearchQuery = '';
     this.set({ searchQuery: '', searchMatches: [], searchActive: 0 });
   }
 

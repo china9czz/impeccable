@@ -487,6 +487,183 @@ try {
   s = await state(page);
   check(s.pageCount === 12, 'open document unchanged after split export');
 
+  // ---------------------------------------------------------- 10. OCR Chinese
+  console.log('OCR Chinese roundtrip');
+  const scannedPath = path.join(root, 'sample', 'scanned-ocr.pdf');
+  if (!existsSync(scannedPath)) run('scripts/make-scanned.mjs');
+  const scannedBytes = readFileSync(scannedPath);
+  await page.evaluate((b64) => {
+    const bin = atob(b64);
+    const data = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) data[i] = bin.charCodeAt(i);
+    return window.__vellumStore.openFile({ path: '', name: 'scanned-ocr.pdf', data });
+  }, scannedBytes.toString('base64'));
+  await page.waitForFunction(
+    () => window.__vellumStore.getState().phase === 'ready' &&
+      window.__vellumStore.getState().fileName === 'scanned-ocr.pdf',
+    null,
+    { timeout: 20_000 },
+  );
+  await page.waitForSelector('canvas.page-canvas', { timeout: 20_000 });
+  // Image-only page: search should find nothing before OCR.
+  await page.fill('#search-input', '你好');
+  await page.press('#search-input', 'Enter');
+  await page.waitForTimeout(800);
+  s = await state(page);
+  check(s.matches === 0, 'image-only PDF has no searchable Chinese before OCR');
+  await page.evaluate(() => window.__vellumStore.clearSearch());
+
+  await page.click('button[title="OCR current page (Chinese + English)"]');
+  await page.waitForFunction(
+    () => {
+      const st = window.__vellumStore.getState();
+      return st.ocrProgress === null && window.__vellumStore.annotationCount() >= 1;
+    },
+    null,
+    { timeout: 180_000 },
+  );
+  const ocrWords = await page.evaluate(() => {
+    const store = window.__vellumStore;
+    const info = store.getPageInfo(0);
+    const anns = info ? store.getAnnotations(info.id) : [];
+    const ocr = anns.find((a) => a.kind === 'ocr');
+    return ocr ? ocr.runs.map((r) => r.text).join(' ') : '';
+  });
+  check(/你好/.test(ocrWords) || /扫描/.test(ocrWords) || /Hello/i.test(ocrWords),
+    `OCR produced Chinese/English text (got "${ocrWords.slice(0, 80)}")`);
+
+  await page.fill('#search-input', '你好');
+  await page.press('#search-input', 'Enter');
+  await page.waitForFunction(() => window.__vellumStore.getState().searchMatches.length > 0, null, {
+    timeout: 20_000,
+  }).catch(() => {});
+  s = await state(page);
+  if (s.matches === 0) {
+    // Fall back to whatever OCR actually found (confidence / font quirks).
+    const probe = (ocrWords.match(/[\u4e00-\u9fff]{2,}/) || ocrWords.match(/Hello/i) || ['OCR'])[0];
+    await page.fill('#search-input', probe);
+    await page.press('#search-input', 'Enter');
+    await page.waitForFunction(() => window.__vellumStore.getState().searchMatches.length > 0, null, {
+      timeout: 20_000,
+    });
+    s = await state(page);
+    check(s.matches >= 1, `in-app search finds OCR text ("${probe}", ${s.matches} matches)`);
+  } else {
+    check(s.matches >= 1, `in-app search finds OCR Chinese (你好, ${s.matches} matches)`);
+  }
+  await page.evaluate(() => window.__vellumStore.clearSearch());
+
+  const [ocrSave] = await Promise.all([
+    page.waitForEvent('download', { timeout: 60_000 }),
+    page.keyboard.press('Control+s'),
+  ]);
+  const ocrSavedBytes = await downloadToBuffer(ocrSave);
+  const ocrPdfjs = await pdfjs.getDocument({
+    data: new Uint8Array(ocrSavedBytes),
+    standardFontDataUrl: path.join(root, 'node_modules', 'pdfjs-dist', 'standard_fonts') + path.sep,
+  }).promise;
+  const ocrPage = await ocrPdfjs.getPage(1);
+  const ocrContent = await ocrPage.getTextContent();
+  const ocrFlat = ocrContent.items.map((item) => item.str).join('');
+  check(
+    /[\u4e00-\u9fff]/.test(ocrFlat) || /Hello/i.test(ocrFlat),
+    `saved PDF keeps OCR text layer (sample: "${ocrFlat.slice(0, 60)}")`,
+  );
+
+  await page.evaluate((b64) => {
+    const bin = atob(b64);
+    const data = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) data[i] = bin.charCodeAt(i);
+    return window.__vellumStore.openFile({ path: '', name: 'ocr-reopen.pdf', data });
+  }, ocrSavedBytes.toString('base64'));
+  await page.waitForFunction(
+    () => window.__vellumStore.getState().phase === 'ready' &&
+      window.__vellumStore.getState().fileName === 'ocr-reopen.pdf',
+    null,
+    { timeout: 30_000 },
+  );
+  await page.waitForSelector('canvas.page-canvas', { timeout: 30_000 });
+  // Prefer a short known token — flattened runs are separate text items joined
+  // with spaces, so a long contiguous CJK slice from ocrFlat may not match.
+  const reopenProbe =
+    (/你好/.test(ocrFlat) && '你好') ||
+    (/扫描/.test(ocrFlat) && '扫描') ||
+    (/Hello/i.test(ocrFlat) && 'Hello') ||
+    (ocrFlat.match(/[\u4e00-\u9fff]{2}/) || ['OCR'])[0];
+  // Drive search via the store directly: the text layer can take a moment to
+  // extract after reopen (embedded CJK font), and UI Enter can race that.
+  await page.evaluate(async (q) => {
+    await window.__vellumStore.runSearch(q);
+  }, reopenProbe);
+  await page.waitForFunction(() => window.__vellumStore.getState().searchMatches.length > 0, null, {
+    timeout: 30_000,
+  });
+  s = await state(page);
+  check(s.matches >= 1, `reopened OCR PDF still searchable ("${reopenProbe}")`);
+  await page.evaluate(() => window.__vellumStore.clearSearch());
+
+  // ----------------------------------------------- 11. signature flatten + undo
+  console.log('signature flatten + undo');
+  const sigDataUrl = await page.evaluate(async () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 240;
+    canvas.height = 80;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, 240, 80);
+    ctx.strokeStyle = '#111827';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(20, 50);
+    ctx.bezierCurveTo(60, 10, 120, 70, 220, 30);
+    ctx.stroke();
+    ctx.font = '18px sans-serif';
+    ctx.fillStyle = '#111827';
+    ctx.fillText('E2E Sign', 70, 60);
+    return canvas.toDataURL('image/png');
+  });
+  await page.evaluate((dataUrl) => {
+    const store = window.__vellumStore;
+    const info = store.getPageInfo(0);
+    if (!info) throw new Error('no page');
+    store.placeSignature(info.id, dataUrl, { x: 80, y: 120 }, { w: 160, h: 54 });
+  }, sigDataUrl);
+  await page.waitForFunction(() => window.__vellumStore.annotationCount() >= 1, null, { timeout: 5000 });
+  check((await page.locator('.ann-signature').count()) >= 1, 'signature annotation renders on the page');
+
+  const beforeSig = await page.evaluate(() => window.__vellumStore.annotationCount());
+  await page.keyboard.press('Control+z');
+  await page.waitForFunction(
+    (n) => window.__vellumStore.annotationCount() === n - 1,
+    beforeSig,
+    { timeout: 5000 },
+  );
+  check(true, 'undo removes the placed signature');
+  await page.keyboard.press('Control+Shift+z');
+  await page.waitForFunction(
+    (n) => window.__vellumStore.annotationCount() === n,
+    beforeSig,
+    { timeout: 5000 },
+  );
+  check(true, 'redo restores the signature');
+
+  // Stamp a second copy via multi-page helper (single page doc → 1 extra).
+  await page.evaluate((dataUrl) => {
+    window.__vellumStore.stampSignatureOnPages(dataUrl, [0]);
+  }, sigDataUrl);
+  const afterStamp = await page.evaluate(() => window.__vellumStore.annotationCount());
+  check(afterStamp >= beforeSig + 1, `stamp adds another signature (count=${afterStamp})`);
+
+  const [sigSave] = await Promise.all([
+    page.waitForEvent('download', { timeout: 30_000 }),
+    page.keyboard.press('Control+s'),
+  ]);
+  const sigBytes = await downloadToBuffer(sigSave);
+  const sigDoc = await PDFDocument.load(sigBytes);
+  check(sigDoc.getPageCount() === 1, 'signature save keeps page count');
+  // pdf-lib embeds images as XObjects; presence of /Subtype /Image is enough.
+  const sigRaw = Buffer.from(sigBytes).toString('latin1');
+  check(/\/Subtype\s*\/Image/.test(sigRaw), 'flattened signature embeds an image XObject');
+
   await page.close();
 } catch (error) {
   failures.push(`harness error: ${error instanceof Error ? error.message : String(error)}`);

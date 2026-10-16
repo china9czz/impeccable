@@ -8,4 +8,8 @@ src/renderer/assets/fonts/*.full.otf
 
 # electron-builder output
 release/
+
+# OCR assets from `npm run vendor-tessdata` (~40 MB; not committed)
 public/tessdata/*.traineddata*
+public/tesseract/
+public/tesseract/

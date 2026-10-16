@@ -7,17 +7,11 @@ export default defineConfig({
   build: {
     outDir: 'dist/renderer',
     emptyOutDir: true,
-    // tesseract.js worker + wasm + CJK font push the main chunk up.
+    // CJK font alone is ~6 MB; keep the warning quiet.
     chunkSizeWarningLimit: 4000,
-  },
-  optimizeDeps: {
-    exclude: ['tesseract.js'],
   },
   server: {
     port: 5173,
     strictPort: true,
-  },
-  worker: {
-    format: 'es',
   },
 });
